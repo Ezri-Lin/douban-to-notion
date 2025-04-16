@@ -24,14 +24,14 @@ BOOKMARK_ICON_URL = "https://www.notion.so/icons/bookmark_gray.svg"
 
 class NotionHelper:
     database_name_dict = {
-        "MOVIE_DATABASE_NAME": "电影",
+        "MOVIE_DATABASE_NAME": "Movie",
         "BOOK_DATABASE_NAME": "书架",
         "DAY_DATABASE_NAME": "日",
         "WEEK_DATABASE_NAME": "周",
         "MONTH_DATABASE_NAME": "月",
         "YEAR_DATABASE_NAME": "年",
-        "CATEGORY_DATABASE_NAME": "分类",
-        "DIRECTOR_DATABASE_NAME": "导演",
+        "CATEGORY_DATABASE_NAME": "Film Genre",
+        "DIRECTOR_DATABASE_NAME": "Director",
         "AUTHOR_DATABASE_NAME": "作者",
     }
     database_id_dict = {}
