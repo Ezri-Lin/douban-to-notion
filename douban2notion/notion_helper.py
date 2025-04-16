@@ -32,7 +32,7 @@ class NotionHelper:
         "YEAR_DATABASE_NAME": "年",
         "CATEGORY_DATABASE_NAME": "Film Genre",
         "DIRECTOR_DATABASE_NAME": "Director",
-        "AUTHOR_DATABASE_NAME": "Actor",
+        "AUTHOR_DATABASE_NAME": "作者",
         "ACTOR_DATABASE_NAME": "Actor",
     }
     database_id_dict = {}
