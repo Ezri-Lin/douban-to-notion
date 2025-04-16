@@ -49,6 +49,8 @@ movie_properties_type_dict = {
     # "阅读天数":NUMBER,
     "日期":DATE,
     "简介":RICH_TEXT,
+    "豆瓣评分":NUMBER,
+    "Year":SELECT,
     # "开始阅读时间":DATE,
     # "最后阅读时间":DATE,
     # "简介":RICH_TEXT,
