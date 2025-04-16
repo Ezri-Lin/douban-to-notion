@@ -38,6 +38,7 @@ movie_properties_type_dict = {
     # "链接":URL,
     "导演":RELATION,
     "演员":MULTI_SELECT,
+    "Actor":RELATION,
     # "Sort":NUMBER,
     "封面":FILES,
     "分类":RELATION,
