@@ -156,6 +156,12 @@ def insert_movie(douban_name,notion_helper):
                         else:
                             l.append(actor.get("name"))  
                 movie["演员"] = l
+                movie["演员1"] = [
+                    notion_helper.get_relation_id(
+                        x.get("name"), notion_helper.actor_database_id, USER_ICON_URL
+                    )
+                    for x in subject.get("actors")[0:100]
+                ]
             if subject.get("directors"):
                 movie["导演"] = [
                     notion_helper.get_relation_id(
