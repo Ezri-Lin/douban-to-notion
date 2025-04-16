@@ -32,7 +32,8 @@ class NotionHelper:
         "YEAR_DATABASE_NAME": "年",
         "CATEGORY_DATABASE_NAME": "Film Genre",
         "DIRECTOR_DATABASE_NAME": "Director",
-        "AUTHOR_DATABASE_NAME": "作者",
+        "AUTHOR_DATABASE_NAME": "Actor",
+        "ACTOR_DATABASE_NAME": "Actor",
     }
     database_id_dict = {}
     image_dict = {}
@@ -78,6 +79,9 @@ class NotionHelper:
         )
         self.author_database_id = self.database_id_dict.get(
             self.database_name_dict.get("AUTHOR_DATABASE_NAME")
+        )
+        self.actor_database_id = self.database_id_dict.get(
+            self.database_name_dict.get("ACTOR_DATABASE_NAME")
         )
         if self.day_database_id:
             self.write_database_id(self.day_database_id)
