@@ -103,6 +103,16 @@ def insert_movie(douban_name,notion_helper):
         movie["日期"] = create_time.int_timestamp
         movie["豆瓣链接"] = subject.get("url")
         movie["状态"] = movie_status.get(result.get("status"))
+        movie["豆瓣评分"] = subject.get("rating", {}).get("value", 0) if subject.get("rating") else 0
+        movie["豆瓣评分人数"] = subject.get("rating", {}).get("count", 0) if subject.get("rating") else 0
+        # 验证必要字段
+        if not subject.get("title") or subject.get("title") == "未知电影":
+            print(f"跳过无效电影: {subject.get('title')}")
+            continue
+        if not subject.get("year"):
+            print(f"跳过无年份电影: {subject.get('title')}")
+            continue
+        movie["Year"] = subject.get("year")
         if result.get("rating"):
             movie["评分"] = rating.get(result.get("rating").get("value"))
         if result.get("comment"):
@@ -116,7 +126,7 @@ def insert_movie(douban_name,notion_helper):
                 or notion_movive.get("评分") != movie.get("评分")
             ):
                 properties = utils.get_properties(movie, movie_properties_type_dict)
-                notion_helper.get_date_relation(properties,create_time)
+                #notion_helper.get_date_relation(properties,create_time)
                 notion_helper.update_page(
                     page_id=notion_movive.get("page_id"),
                     properties=properties
@@ -128,7 +138,7 @@ def insert_movie(douban_name,notion_helper):
             if not cover.endswith('.webp'):
                 cover = cover.rsplit('.', 1)[0] + '.webp'
             movie["封面"] = cover
-            movie["类型"] = subject.get("type")
+            movie["类型"] = subject.get("type").upper() if subject.get("type") else None
             if subject.get("genres"):
                 movie["分类"] = [
                     notion_helper.get_relation_id(
@@ -252,12 +262,30 @@ def main():
     parser.add_argument("type")
     options = parser.parse_args()
     type = options.type
-    notion_helper = NotionHelper(type)
-    is_movie = True if type=="movie" else False
-    douban_name = os.getenv("DOUBAN_NAME", None)
-    if is_movie:
-        insert_movie(douban_name,notion_helper)
-    else:
-        insert_book(douban_name,notion_helper)
+    # notion_helper = NotionHelper(type)
+    # is_movie = True if type=="movie" else False
+    # douban_name = os.getenv("DOUBAN_NAME", None)
+    # if is_movie:
+    #     insert_movie(douban_name,notion_helper)
+    # else:
+    #     insert_book(douban_name,notion_helper)
+    try:
+        notion_helper = NotionHelper(type)
+        is_movie = True if type=="movie" else False
+        douban_name = os.getenv("DOUBAN_NAME", None)
+        if not douban_name:
+            raise ValueError("DOUBAN_NAME environment variable is required")
+            
+        if is_movie:
+            insert_movie(douban_name,notion_helper)
+        else:
+            insert_book(douban_name,notion_helper)
+    except ValueError as e:
+        print(f"错误: {str(e)}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"发生错误: {str(e)}")
+        sys.exit(1)
+
 if __name__ == "__main__":
     main()
