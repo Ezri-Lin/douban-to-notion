@@ -12,7 +12,7 @@ MULTI_SELECT = "multi_select"
 
 book_properties_type_dict = {
     "Name":TITLE,
-    "Short Comment":RICH_TEXT,
+    "Remark":RICH_TEXT,
     "ISBN":RICH_TEXT,
     "Url":URL,
     "Author":RELATION,
@@ -35,7 +35,7 @@ BOOK_ICON_URL = "https://www.notion.so/icons/book_gray.svg"
 
 movie_properties_type_dict = {
     "Name":TITLE,
-    "Short Comment":RICH_TEXT,
+    "Remark":RICH_TEXT,
     # "ISBN":RICH_TEXT,
     # "链接":URL,
     "Director":RELATION,
