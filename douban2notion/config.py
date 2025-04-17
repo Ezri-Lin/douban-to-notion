@@ -24,6 +24,9 @@ book_properties_type_dict = {
     "简介":RICH_TEXT,
     "豆瓣链接":URL,
     "出版社":MULTI_SELECT,
+    "Year":SELECT,
+    "豆瓣评分":NUMBER,
+    "豆瓣评分人数":NUMBER
 }
 
 TAG_ICON_URL = "https://www.notion.so/icons/tag_gray.svg"
