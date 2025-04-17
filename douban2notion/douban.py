@@ -199,6 +199,7 @@ def insert_book(douban_name,notion_helper):
     for i in book_status.keys():
         results.extend(fetch_subjects(douban_name, "book", i))
     for result in results:
+        print(result)
         book = {}
         subject = result.get("subject")
         book["书名"] = subject.get("title")
@@ -209,6 +210,19 @@ def insert_book(douban_name,notion_helper):
         book["日期"] = create_time.int_timestamp
         book["豆瓣链接"] = subject.get("url")
         book["状态"] = book_status.get(result.get("status"))
+        book["豆瓣评分"] = subject.get("rating", {}).get("value", 0) if subject.get("rating") else 0
+        book["豆瓣评分人数"] = subject.get("rating", {}).get("count", 0) if subject.get("rating") else 0
+
+        # 验证必要字段
+        if not subject.get("title") or subject.get("title") == "未知电影":
+            print(f"跳过无效书籍: {subject.get('title')}")
+            continue
+        # 从 pubdate 中提取年份
+        pubdate = subject.get("pubdate", [])
+        if pubdate and len(pubdate) > 0:
+            # 提取第一个日期中的年份
+            year = pubdate[0].split("-")[0] if "-" in pubdate[0] else pubdate[0].split(".")[0]
+            book["Year"] = year
         if result.get("rating"):
             book["评分"] = rating.get(result.get("rating").get("value"))
         if result.get("comment"):
@@ -222,7 +236,7 @@ def insert_book(douban_name,notion_helper):
                 or notion_movive.get("评分") != book.get("评分")
             ):
                 properties = utils.get_properties(book, book_properties_type_dict)
-                notion_helper.get_date_relation(properties,create_time)
+                #notion_helper.get_date_relation(properties,create_time)
                 notion_helper.update_page(
                     page_id=notion_movive.get("page_id"),
                     properties=properties
@@ -231,6 +245,15 @@ def insert_book(douban_name,notion_helper):
         else:
             print(f"插入{book.get('书名')}")
             cover = subject.get("pic").get("large")
+            # 处理图片链接，确保使用 large 尺寸的图片
+            if cover:
+                # 替换图片链接中的尺寸参数
+                cover = cover.replace("/l/", "/l/")  # 确保使用大图
+                # 移除任何查询参数
+                cover = cover.split("?")[0]
+                # 确保链接以 .jpg 结尾
+                if not cover.endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                    cover = cover + '.jpg'
             book["封面"] = cover
             book["简介"] = subject.get("intro")
             press = []
@@ -253,7 +276,7 @@ def insert_book(douban_name,notion_helper):
                     for x in subject.get("author")[0:100]
                 ]
             properties = utils.get_properties(book, book_properties_type_dict)
-            notion_helper.get_date_relation(properties,create_time)
+            #notion_helper.get_date_relation(properties,create_time)
             parent = {
                 "database_id": notion_helper.book_database_id,
                 "type": "database_id",
