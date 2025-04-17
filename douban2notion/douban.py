@@ -170,7 +170,7 @@ def insert_movie(douban_name,notion_helper):
                     for x in subject.get("directors")[0:100]
                 ]
             properties = utils.get_properties(movie, movie_properties_type_dict)
-            notion_helper.get_date_relation(properties,create_time)
+            #notion_helper.get_date_relation(properties,create_time)
             parent = {
                 "database_id": notion_helper.movie_database_id,
                 "type": "database_id",
