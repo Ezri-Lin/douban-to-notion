@@ -30,7 +30,7 @@ class NotionHelper:
         "WEEK_DATABASE_NAME": "周",
         "MONTH_DATABASE_NAME": "月",
         "YEAR_DATABASE_NAME": "年",
-        "CATEGORY_DATABASE_NAME": "Film Genre",
+        "CATEGORY_DATABASE_NAME": "CATEGORY",
         "DIRECTOR_DATABASE_NAME": "Director",
         "AUTHOR_DATABASE_NAME": "作者",
         "ACTOR_DATABASE_NAME": "Actor",
