@@ -82,7 +82,7 @@ def insert_movie(douban_name,notion_helper):
             "Remark": movie.get("Remark"),
             "Status": movie.get("Status"),
             "Date": movie.get("Date"),
-            "Ratin": movie.get("Ratin"),
+            "Rating": movie.get("Rating"),
             "page_id": i.get("id")
         }
     print(f"notion {len(notion_movie_dict)}")
