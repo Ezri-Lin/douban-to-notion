@@ -3,6 +3,7 @@ from email import feedparser
 import json
 import os
 import re
+import sys
 import pendulum
 from retrying import retry
 import requests
@@ -11,7 +12,18 @@ from douban2notion import utils
 DOUBAN_API_HOST = os.getenv("DOUBAN_API_HOST", "frodo.douban.com")
 DOUBAN_API_KEY = os.getenv("DOUBAN_API_KEY", "0ac44ae016490db2204ce0a042db2916")
 
-from douban2notion.config import movie_properties_type_dict,book_properties_type_dict, TAG_ICON_URL, USER_ICON_URL
+from douban2notion.config import (
+    movie_properties_type_dict,
+    book_properties_type_dict, 
+    TAG_ICON_URL, 
+    USER_ICON_URL,
+    # MAX_ACTORS_MULTI_SELECT,  # 已移除Actors (multi_select)，使用Actor (relation)代替
+    MAX_ACTORS_RELATION,
+    MAX_DIRECTORS_RELATION,
+    MAX_CATEGORIES_RELATION,
+    MAX_AUTHORS_RELATION,
+    MAX_PUBLISHERS_MULTI_SELECT
+)
 from douban2notion.utils import get_icon
 from dotenv import load_dotenv
 load_dotenv()
@@ -125,7 +137,32 @@ def insert_movie(douban_name,notion_helper):
                 or notion_movive.get("Status") != movie.get("Status")
                 or notion_movive.get("Rating") != movie.get("Rating")
             ):
-                properties = utils.get_properties(movie, movie_properties_type_dict)
+                # 创建更新用的简化电影数据，限制关系数量
+                update_movie = {
+                    "Name": movie.get("Name"),
+                    "Date": movie.get("Date"),
+                    "Url": movie.get("Url"),
+                    "Status": movie.get("Status"),
+                    "DoubanRating": movie.get("DoubanRating"),
+                    "Year": movie.get("Year"),
+                    "Cover": movie.get("Cover"),
+                    "Medium": movie.get("Medium"),
+                    "Remark": movie.get("Remark")
+                }
+                # 添加Rating字段
+                if movie.get("Rating"):
+                    update_movie["Rating"] = movie.get("Rating")
+                # 限制演员和导演数量，使用配置常量以减少schema大小
+                if movie.get("Category"):
+                    update_movie["Category"] = movie.get("Category")[:MAX_CATEGORIES_RELATION]
+                if movie.get("Actor"):
+                    update_movie["Actor"] = movie.get("Actor")[:MAX_ACTORS_RELATION]
+                if movie.get("Director"):
+                    update_movie["Director"] = movie.get("Director")[:MAX_DIRECTORS_RELATION]
+                # 已移除Actors (multi_select)，使用Actor (relation)代替
+                # if movie.get("Actors"):
+                #     update_movie["Actors"] = movie.get("Actors")[:MAX_ACTORS_MULTI_SELECT]
+                properties = utils.get_properties(update_movie, movie_properties_type_dict)
                 #notion_helper.get_date_relation(properties,create_time)
                 notion_helper.update_page(
                     page_id=notion_movive.get("page_id"),
@@ -144,23 +181,25 @@ def insert_movie(douban_name,notion_helper):
                     notion_helper.get_relation_id(
                         x, notion_helper.category_database_id, TAG_ICON_URL
                     )
-                    for x in subject.get("genres")
+                    for x in subject.get("genres")[:MAX_CATEGORIES_RELATION]
                 ]
             if subject.get("actors"):
-                l = []
-                actors = subject.get("actors")[0:100]
-                for actor in actors:
-                    if actor.get("name"):
-                        if "/" in actor.get("name"):
-                            l.extend(actor.get("name").split("/"))
-                        else:
-                            l.append(actor.get("name"))  
-                movie["Actors"] = l
+                # 已移除Actors (multi_select)，使用Actor (relation)代替
+                # l = []
+                # actors = subject.get("actors")[0:100]
+                # for actor in actors:
+                #     if actor.get("name"):
+                #         if "/" in actor.get("name"):
+                #             l.extend(actor.get("name").split("/"))
+                #         else:
+                #             l.append(actor.get("name"))  
+                # movie["Actors"] = l
                 movie["Actor"] = [
                     notion_helper.get_relation_id(
                         x.get("name"), notion_helper.actor_database_id, USER_ICON_URL
                     )
                     for x in subject.get("actors")[0:100]
+                    if x.get("name")
                 ]
             if subject.get("directors"):
                 movie["Director"] = [
@@ -168,16 +207,69 @@ def insert_movie(douban_name,notion_helper):
                         x.get("name"), notion_helper.director_database_id, USER_ICON_URL
                     )
                     for x in subject.get("directors")[0:100]
+                    if x.get("name")
                 ]
-            properties = utils.get_properties(movie, movie_properties_type_dict)
-            #notion_helper.get_date_relation(properties,create_time)
+            # 创建电影数据，包含所有字段但限制数量
+            simple_movie = {
+                "Name": movie.get("Name"),
+                "Date": movie.get("Date"),
+                "Url": movie.get("Url"),
+                "Status": movie.get("Status"),
+                "DoubanRating": movie.get("DoubanRating"),
+                "Year": movie.get("Year"),
+                "Cover": movie.get("Cover"),
+                "Medium": movie.get("Medium"),
+                "Remark": movie.get("Remark")
+            }
+            # 添加Rating字段
+            if movie.get("Rating"):
+                simple_movie["Rating"] = movie.get("Rating")
+            
+            # 添加关系字段，但限制数量以减少schema大小
+            if movie.get("Category"):
+                simple_movie["Category"] = movie.get("Category")[:MAX_CATEGORIES_RELATION]
+            if movie.get("Actor"):
+                simple_movie["Actor"] = movie.get("Actor")[:MAX_ACTORS_RELATION]
+            if movie.get("Director"):
+                simple_movie["Director"] = movie.get("Director")[:MAX_DIRECTORS_RELATION]
+            # 已移除Actors (multi_select)，使用Actor (relation)代替
+            # if movie.get("Actors"):
+            #     simple_movie["Actors"] = movie.get("Actors")[:MAX_ACTORS_MULTI_SELECT]
+            
+            properties = utils.get_properties(simple_movie, movie_properties_type_dict)
+            
+            # 调试信息：打印属性详情
+            print(f"调试信息 - 电影: {movie.get('Name')}")
+            print(f"  属性数量: {len(properties)}")
+            print(f"  属性列表: {list(properties.keys())}")
+            # 检查Rating字段
+            if "Rating" in properties:
+                print(f"  Rating字段: {properties['Rating']}")
+            elif movie.get("Rating"):
+                print(f"  警告: Rating有值但未包含在properties中: {movie.get('Rating')}")
+            else:
+                print(f"  提示: Rating字段为空（用户可能未评分）")
+            # 统计关系字段的数量
+            relation_counts = {}
+            for key, value in properties.items():
+                if isinstance(value, dict):
+                    if "relation" in value:
+                        relation_counts[key] = len(value["relation"])
+                    elif "multi_select" in value:
+                        relation_counts[key] = len(value["multi_select"])
+            if relation_counts:
+                print(f"  关系字段数量: {relation_counts}")
             parent = {
                 "database_id": notion_helper.movie_database_id,
                 "type": "database_id",
             }
-            notion_helper.create_page(
+            result = notion_helper.create_page(
                 parent=parent, properties=properties, icon=get_icon(cover)
             )
+            # 如果创建失败（例如schema大小超限），跳过继续处理下一个
+            if result is None:
+                print(f"跳过电影: {movie.get('Name')} (创建失败)")
+                continue
 
 
 def insert_book(douban_name,notion_helper):
@@ -235,7 +327,29 @@ def insert_book(douban_name,notion_helper):
                 or notion_movive.get("Status") != book.get("Status")
                 or notion_movive.get("Rating") != book.get("Rating")
             ):
-                properties = utils.get_properties(book, book_properties_type_dict)
+                # 创建更新用的简化书籍数据，限制关系数量
+                update_book = {
+                    "Name": book.get("Name"),
+                    "Date": book.get("Date"),
+                    "Url": book.get("Url"),
+                    "Status": book.get("Status"),
+                    "DoubanRating": book.get("DoubanRating"),
+                    "Raters": book.get("Raters"),
+                    "Year": book.get("Year"),
+                    "Cover": book.get("Cover"),
+                    "Remark": book.get("Remark")
+                }
+                # 添加Rating字段
+                if book.get("Rating"):
+                    update_book["Rating"] = book.get("Rating")
+                # 限制关系字段数量，使用配置常量
+                if book.get("Publisher"):
+                    update_book["Publisher"] = book.get("Publisher")[:MAX_PUBLISHERS_MULTI_SELECT]
+                if book.get("Category"):
+                    update_book["Category"] = book.get("Category")[:MAX_CATEGORIES_RELATION]
+                if book.get("Author"):
+                    update_book["Author"] = book.get("Author")[:MAX_AUTHORS_RELATION]
+                properties = utils.get_properties(update_book, book_properties_type_dict)
                 #notion_helper.get_date_relation(properties,create_time)
                 notion_helper.update_page(
                     page_id=notion_movive.get("page_id"),
@@ -255,35 +369,64 @@ def insert_book(douban_name,notion_helper):
                 if not cover.endswith(('.jpg', '.jpeg', '.png', '.webp')):
                     cover = cover + '.jpg'
             book["Cover"] = cover
-            book["Intro"] = subject.get("intro")
+            # 移除Intro字段以减少schema大小（如果不需要可以注释掉）
+            # book["Intro"] = subject.get("intro")
             press = []
             for i in subject.get("press"):
                 press.extend(i.split(","))
-            book["Publisher"] = press
+            # 限制出版社数量
+            book["Publisher"] = press[:MAX_PUBLISHERS_MULTI_SELECT]
             book["类型"] = subject.get("type")
             if result.get("tags"):
                 book["Category"] = [
                     notion_helper.get_relation_id(
                         x, notion_helper.category_database_id, TAG_ICON_URL
                     )
-                    for x in result.get("tags")
+                    for x in result.get("tags")[:MAX_CATEGORIES_RELATION]
                 ]
             if subject.get("author"):
                 book["Author"] = [
                     notion_helper.get_relation_id(
                         x, notion_helper.author_database_id, USER_ICON_URL
                     )
-                    for x in subject.get("author")[0:100]
+                    for x in subject.get("author")[:MAX_AUTHORS_RELATION]
                 ]
             properties = utils.get_properties(book, book_properties_type_dict)
+            
+            # 调试信息：打印属性详情
+            print(f"调试信息 - 书籍: {book.get('Name')}")
+            print(f"  属性数量: {len(properties)}")
+            print(f"  属性列表: {list(properties.keys())}")
+            # 检查Rating字段
+            if "Rating" in properties:
+                print(f"  Rating字段: {properties['Rating']}")
+            elif book.get("Rating"):
+                print(f"  警告: Rating有值但未包含在properties中: {book.get('Rating')}")
+            else:
+                print(f"  提示: Rating字段为空（用户可能未评分）")
+            # 统计关系字段的数量
+            relation_counts = {}
+            for key, value in properties.items():
+                if isinstance(value, dict):
+                    if "relation" in value:
+                        relation_counts[key] = len(value["relation"])
+                    elif "multi_select" in value:
+                        relation_counts[key] = len(value["multi_select"])
+            if relation_counts:
+                print(f"  关系字段数量: {relation_counts}")
+            
             #notion_helper.get_date_relation(properties,create_time)
             parent = {
                 "database_id": notion_helper.book_database_id,
                 "type": "database_id",
             }
-            notion_helper.create_page(
+            result = notion_helper.create_page(
                 parent=parent, properties=properties, icon=get_icon(cover)
             )
+            # 如果创建失败（例如schema大小超限），跳过继续处理下一个
+            if result is None:
+                print(f"跳过书籍: {book.get('Name')} (创建失败)")
+                continue
 
      
 def main():

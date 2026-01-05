@@ -89,6 +89,8 @@ def get_date(start, end=None):
 
 
 def get_icon(url):
+    if not url:
+        return None
     return {"type": "external", "external": {"url": url}}
 
 
@@ -257,9 +259,17 @@ def get_properties(dict1, dict2):
         elif type==SELECT:
             property = {"select": {"name": value}}        
         elif type==MULTI_SELECT:
-            property = {"multi_select": [{"name": name} for name in value]}
+            if isinstance(value, list):
+                property = {"multi_select": [{"name": name} for name in value]}
+            else:
+                print(f"警告: {key} 的值不是列表类型: {value}")
+                continue
         elif type == RELATION:
-            property = {"relation": [{"id": id} for id in value]}
+            if isinstance(value, list):
+                property = {"relation": [{"id": id} for id in value if id]}
+            else:
+                print(f"警告: {key} 的值不是列表类型: {value}")
+                continue
         if property:
             properties[key] = property
     return properties
@@ -317,7 +327,7 @@ def calculate_book_str_id(book_id):
 
 def transform_id(book_id):
     id_length = len(book_id)
-    if re.match("^\d*$", book_id):
+    if re.match(r"^\d*$", book_id):
         ary = []
         for i in range(0, id_length, 9):
             ary.append(format(int(book_id[i : min(i + 9, id_length)]), "x"))

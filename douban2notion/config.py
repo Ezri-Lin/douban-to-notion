@@ -32,6 +32,15 @@ TAG_ICON_URL = "https://www.notion.so/icons/tag_gray.svg"
 USER_ICON_URL = "https://www.notion.so/icons/user-circle-filled_gray.svg"
 BOOK_ICON_URL = "https://www.notion.so/icons/book_gray.svg"
 
+# 数据限制常量 - 用于减少Notion数据库schema大小
+# 限制关系字段的数量，避免超过Notion的schema大小限制（通常为100个属性）
+# MAX_ACTORS_MULTI_SELECT = 3  # Actors (multi_select) 最大数量 - 已移除，使用Actor (relation)代替
+MAX_ACTORS_RELATION = 5  # Actor (relation) 最大数量
+MAX_DIRECTORS_RELATION = 2  # Director (relation) 最大数量
+MAX_CATEGORIES_RELATION = 3  # Category (relation) 最大数量
+MAX_AUTHORS_RELATION = 3  # Author (relation) 最大数量
+MAX_PUBLISHERS_MULTI_SELECT = 3  # Publisher (multi_select) 最大数量
+
 
 movie_properties_type_dict = {
     "Name":TITLE,
@@ -39,7 +48,7 @@ movie_properties_type_dict = {
     # "ISBN":RICH_TEXT,
     # "链接":URL,
     "Director":RELATION,
-    "Actors":MULTI_SELECT,
+    # "Actors":MULTI_SELECT,  # 已移除，使用Actor (relation)代替
     "Actor":RELATION,
     # "Sort":NUMBER,
     "Cover":FILES,

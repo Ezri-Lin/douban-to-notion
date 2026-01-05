@@ -207,8 +207,87 @@ class NotionHelper:
         )
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
+    def get_database_schema(self, database_id):
+        """获取数据库的schema信息"""
+        try:
+            database = self.client.databases.retrieve(database_id=database_id)
+            properties = database.get("properties", {})
+            return {
+                "property_count": len(properties),
+                "properties": list(properties.keys()),
+                "property_types": {k: v.get("type") for k, v in properties.items()}
+            }
+        except Exception as e:
+            print(f"获取数据库schema失败: {str(e)}")
+            return None
+
+    @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def create_page(self, parent, properties, icon):
-        return self.client.pages.create(parent=parent, properties=properties, icon=icon)
+        try:
+            if icon:
+                return self.client.pages.create(parent=parent, properties=properties, icon=icon)
+            else:
+                return self.client.pages.create(parent=parent, properties=properties)
+        except Exception as e:
+            error_msg = str(e)
+            print(f"创建页面失败: {error_msg}")
+            # 如果是数据库schema大小超限错误，尝试使用最小属性集
+            if "database schema has exceeded the maximum size" in error_msg.lower():
+                print(f"警告: 数据库schema已达到最大限制。")
+                
+                # 获取数据库schema信息
+                database_id = parent.get("database_id")
+                if database_id:
+                    schema_info = self.get_database_schema(database_id)
+                    if schema_info:
+                        print(f"  数据库当前属性数量: {schema_info['property_count']}/100 (Notion限制)")
+                        print(f"  数据库已有属性: {schema_info['properties']}")
+                
+                # 详细调试信息
+                print(f"调试信息 - Schema大小超限:")
+                print(f"  尝试发送的属性数量: {len(properties)}")
+                print(f"  尝试发送的属性名称: {list(properties.keys())}")
+                
+                # 尝试使用最小属性集（只保留核心必需属性）
+                minimal_properties = self._get_minimal_properties(properties)
+                if minimal_properties and len(minimal_properties) < len(properties):
+                    print(f"  尝试使用最小属性集 ({len(minimal_properties)} 个属性): {list(minimal_properties.keys())}")
+                    try:
+                        if icon:
+                            return self.client.pages.create(parent=parent, properties=minimal_properties, icon=icon)
+                        else:
+                            return self.client.pages.create(parent=parent, properties=minimal_properties)
+                    except Exception as e2:
+                        print(f"  使用最小属性集也失败: {str(e2)}")
+                
+                # 统计每个属性的数据大小
+                for key, value in properties.items():
+                    if isinstance(value, dict):
+                        if "relation" in value:
+                            print(f"  {key} (relation): {len(value['relation'])} 个关系")
+                        elif "multi_select" in value:
+                            print(f"  {key} (multi_select): {len(value['multi_select'])} 个选项")
+                        elif "files" in value:
+                            print(f"  {key} (files): {len(value['files'])} 个文件")
+                        else:
+                            print(f"  {key}: {type(value).__name__}")
+                
+                print(f"建议: 请在Notion中删除一些不必要的数据库属性，或创建新的数据库。")
+                return None
+            print(f"Parent: {parent}")
+            print(f"Properties: {properties}")
+            print(f"Icon: {icon}")
+            raise e
+
+    def _get_minimal_properties(self, properties):
+        """获取最小属性集（只保留核心必需属性）"""
+        # 核心必需属性：Name, Url, Date, Status
+        essential_keys = ["Name", "Url", "Date", "Status"]
+        minimal = {}
+        for key in essential_keys:
+            if key in properties:
+                minimal[key] = properties[key]
+        return minimal
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def query(self, **kwargs):
