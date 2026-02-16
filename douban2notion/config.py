@@ -43,7 +43,8 @@ MAX_PUBLISHERS_MULTI_SELECT = 3  # Publisher (multi_select) 最大数量
 
 
 movie_properties_type_dict = {
-    "Name":TITLE,
+    "Name":TITLE,  # 原名（中文片用中文，外文片用外文）
+    "MovieName":RICH_TEXT,  # 翻译名
     "Remark":RICH_TEXT,
     # "ISBN":RICH_TEXT,
     # "链接":URL,
@@ -62,6 +63,7 @@ movie_properties_type_dict = {
     "Date":DATE,
     "Intro":RICH_TEXT,
     "DoubanRating":NUMBER,
+    "IMDBRating":NUMBER,  # IMDB评分
     "Year":SELECT,
     "IMDB":RICH_TEXT,
     # "开始阅读时间":DATE,

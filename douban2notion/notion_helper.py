@@ -85,8 +85,12 @@ class NotionHelper:
         )
         if self.day_database_id:
             self.write_database_id(self.day_database_id)
-        if is_movie:
-            self.update_movie_database()
+        # 注释掉自动更新schema功能，因为数据库已达到字段上限
+        # 请手动确保Movie数据库包含以下字段：
+        # - Actor (Relation类型，关联到Actor数据库)
+        # - IMDB (Text类型)
+        # if is_movie:
+        #     self.update_movie_database()
 
     def write_database_id(self, database_id):
         env_file = os.getenv('GITHUB_ENV')
@@ -222,10 +226,11 @@ class NotionHelper:
         return self.client.pages.update(page_id=page_id, properties=properties)
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
-    def update_page(self, page_id, properties):
-        return self.client.pages.update(
-            page_id=page_id, properties=properties
-        )
+    def update_page(self, page_id, properties, icon=None):
+        update_data = {"page_id": page_id, "properties": properties}
+        if icon:
+            update_data["icon"] = icon
+        return self.client.pages.update(**update_data)
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def get_database_schema(self, database_id):
@@ -370,23 +375,28 @@ class NotionHelper:
         return results
 
     def get_date_relation(self, properties, date):
-        properties["年"] = get_relation(
-            [
-                self.get_year_relation_id(date),
-            ]
-        )
-        properties["月"] = get_relation(
-            [
-                self.get_month_relation_id(date),
-            ]
-        )
-        properties["周"] = get_relation(
-            [
-                self.get_week_relation_id(date),
-            ]
-        )
-        properties["日"] = get_relation(
-            [
-                self.get_day_relation_id(date),
-            ]
-        )
+        """
+        禁用日期关系功能（日/周/月/年数据库）
+        如果需要启用，请取消下面代码的注释并确保Notion中存在对应的数据库
+        """
+        # properties["年"] = get_relation(
+        #     [
+        #         self.get_year_relation_id(date),
+        #     ]
+        # )
+        # properties["月"] = get_relation(
+        #     [
+        #         self.get_month_relation_id(date),
+        #     ]
+        # )
+        # properties["周"] = get_relation(
+        #     [
+        #         self.get_week_relation_id(date),
+        #     ]
+        # )
+        # properties["日"] = get_relation(
+        #     [
+        #         self.get_day_relation_id(date),
+        #     ]
+        # )
+        pass
