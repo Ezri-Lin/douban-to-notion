@@ -63,6 +63,7 @@ movie_properties_type_dict = {
     "Intro":RICH_TEXT,
     "DoubanRating":NUMBER,
     "Year":SELECT,
+    "IMDB":RICH_TEXT,
     # "开始阅读时间":DATE,
     # "最后阅读时间":DATE,
     # "简介":RICH_TEXT,
