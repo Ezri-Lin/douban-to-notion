@@ -14,7 +14,7 @@ book_properties_type_dict = {
     "Name":TITLE,
     "Remark":RICH_TEXT,
     "ISBN":RICH_TEXT,
-    "Url":URL,
+    "DB_Url":URL,
     "Author":RELATION,
     "Rating":SELECT,
     "Cover":FILES,
@@ -32,44 +32,50 @@ TAG_ICON_URL = "https://www.notion.so/icons/tag_gray.svg"
 USER_ICON_URL = "https://www.notion.so/icons/user-circle-filled_gray.svg"
 BOOK_ICON_URL = "https://www.notion.so/icons/book_gray.svg"
 
-# 数据限制常量 - 用于减少Notion数据库schema大小
-# 限制关系字段的数量，避免超过Notion的schema大小限制（通常为100个属性）
-# MAX_ACTORS_MULTI_SELECT = 3  # Actors (multi_select) 最大数量 - 已移除，使用Actor (relation)代替
-MAX_ACTORS_RELATION = 5  # Actor (relation) 最大数量
-MAX_DIRECTORS_RELATION = 2  # Director (relation) 最大数量
-MAX_CATEGORIES_RELATION = 3  # Category (relation) 最大数量
-MAX_AUTHORS_RELATION = 3  # Author (relation) 最大数量
-MAX_PUBLISHERS_MULTI_SELECT = 3  # Publisher (multi_select) 最大数量
+MAX_ACTORS_RELATION = 5
+MAX_DIRECTORS_RELATION = 2
+MAX_CATEGORIES_RELATION = 3
+MAX_AUTHORS_RELATION = 3
+MAX_PUBLISHERS_MULTI_SELECT = 3
+
+# Actor/Director数据库字段定义
+actor_properties_type_dict = {
+    "Name": TITLE,  # 人物名字
+    "C-Name": RICH_TEXT,  # 中文译名
+    "Photo": FILES,  # 人物照片
+    "Nation": SELECT,  # 国籍
+    "Bio": RICH_TEXT,  # 简介
+    "IMDB": RICH_TEXT,  # IMDB编号
+}
+
+director_properties_type_dict = {
+    "Name": TITLE,
+    "C-Name": RICH_TEXT,
+    "Photo": FILES,
+    "Nation": SELECT,
+    "Bio": RICH_TEXT,
+    "IMDB": RICH_TEXT,
+}
 
 
 movie_properties_type_dict = {
-    "Name":TITLE,  # 原名（中文片用中文，外文片用外文）
-    "MovieName":RICH_TEXT,  # 翻译名
-    "Remark":RICH_TEXT,
-    # "ISBN":RICH_TEXT,
-    # "链接":URL,
-    "Director":RELATION,
-    # "Actors":MULTI_SELECT,  # 已移除，使用Actor (relation)代替
-    "Actor":RELATION,
-    # "Sort":NUMBER,
-    "Cover":FILES,
-    "Category":RELATION,
-    "Status":STATUS,
-    "Medium":SELECT,
-    "Rating":SELECT,
-    # "阅读时长":NUMBER,
-    # "阅读进度":NUMBER,
-    # "阅读天数":NUMBER,
-    "Date":DATE,
-    "Intro":RICH_TEXT,
-    "DoubanRating":NUMBER,
-    "IMDBRating":NUMBER,  # IMDB评分
-    "Year":SELECT,
-    "IMDB":RICH_TEXT,
-    # "开始阅读时间":DATE,
-    # "最后阅读时间":DATE,
-    # "简介":RICH_TEXT,
-    # "书架分类":SELECT,
-    # "我的评分":SELECT,
-    "Url":URL,
+    "Name": TITLE,
+    "MovieName": RICH_TEXT,
+    "Remark": RICH_TEXT,
+    "Director": RELATION,
+    "Actor": RELATION,
+    "Cover": FILES,
+    "Category": RELATION,
+    "Status": STATUS,
+    "Medium": SELECT,
+    "Rating": SELECT,
+    "Date": DATE,
+    "Intro": RICH_TEXT,
+    "DoubanRating": NUMBER,
+    "IMDBRating": NUMBER,
+    "Year": SELECT,
+    "Season": SELECT,
+    "IMDB": RICH_TEXT,
+    "IMDB_Url": URL,
+    "DB_Url": URL,
 }

@@ -3,6 +3,7 @@ import os
 import re
 
 from notion_client import Client
+from notion_client.errors import APIResponseError
 from retrying import retry
 
 from douban2notion.utils import (
@@ -12,6 +13,7 @@ from douban2notion.utils import (
     get_first_and_last_day_of_week,
     get_first_and_last_day_of_year,
     get_icon,
+    get_rich_text,
     get_relation,
     get_title,
 )
@@ -37,8 +39,9 @@ class NotionHelper:
     }
     database_id_dict = {}
     image_dict = {}
-    def __init__(self,type):
-        is_movie = True if type=="movie" else False
+
+    def __init__(self, type):
+        is_movie = True if type == "movie" else False
         page_url = os.getenv("NOTION_MOVIE_URL") if is_movie else os.getenv("NOTION_BOOK_URL")
         notion_token = os.getenv("NOTION_TOKEN")
         if not notion_token:
@@ -48,6 +51,7 @@ class NotionHelper:
                 notion_token = os.getenv("BOOK_NOTION_TOKEN")
         self.client = Client(auth=notion_token, log_level=logging.ERROR)
         self.__cache = {}
+        self.__db_schema_cache = {}
         self.page_id = self.extract_page_id(page_url)
         self.search_database(self.page_id)
         for key in self.database_name_dict.keys():
@@ -79,26 +83,19 @@ class NotionHelper:
         )
         self.author_database_id = self.database_id_dict.get(
             self.database_name_dict.get("AUTHOR_DATABASE_NAME")
-        )      
+        )
         self.actor_database_id = self.database_id_dict.get(
             self.database_name_dict.get("ACTOR_DATABASE_NAME")
         )
         if self.day_database_id:
             self.write_database_id(self.day_database_id)
-        # 注释掉自动更新schema功能，因为数据库已达到字段上限
-        # 请手动确保Movie数据库包含以下字段：
-        # - Actor (Relation类型，关联到Actor数据库)
-        # - IMDB (Text类型)
-        # if is_movie:
-        #     self.update_movie_database()
 
     def write_database_id(self, database_id):
         env_file = os.getenv('GITHUB_ENV')
-        # 将值写入环境文件
         with open(env_file, "a") as file:
             file.write(f"DATABASE_ID={database_id}\n")
+
     def extract_page_id(self, notion_url):
-        # 正则表达式匹配 32 个字符的 Notion page_id
         match = re.search(
             r"([a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})",
             notion_url,
@@ -111,10 +108,7 @@ class NotionHelper:
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def search_database(self, block_id):
         children = self.client.blocks.children.list(block_id=block_id)["results"]
-        # 遍历子块
         for child in children:
-            # 检查子块的类型
-
             if child["type"] == "child_database":
                 self.database_id_dict[
                     child.get("child_database").get("title")
@@ -122,14 +116,64 @@ class NotionHelper:
             elif child["type"] == "embed" and child.get("embed").get("url"):
                 if child.get("embed").get("url").startswith("https://heatmap.malinkang.com/"):
                     self.heatmap_block_id = child.get("id")
-            # 如果子块有子块，递归调用函数
             if "has_children" in child and child["has_children"]:
                 self.search_database(child["id"])
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def update_heatmap(self, block_id, url):
-        # 更新 image block 的链接
         return self.client.blocks.update(block_id=block_id, embed={"url": url})
+
+    def get_database_schema(self, database_id):
+        if database_id in self.__db_schema_cache:
+            return self.__db_schema_cache[database_id]
+        schema = self.client.databases.retrieve(database_id=database_id)
+        self.__db_schema_cache[database_id] = schema
+        return schema
+
+    def has_select_option(self, database_id, property_name, option_name):
+        if not option_name:
+            return False
+        schema = self.get_database_schema(database_id)
+        properties = schema.get("properties", {})
+        prop = properties.get(property_name)
+        if not prop or prop.get("type") != "select":
+            return False
+        options = prop.get("select", {}).get("options", [])
+        option_names = {x.get("name") for x in options}
+        return option_name in option_names
+
+    def ensure_select_option(self, database_id, property_name, option_name):
+        """确保 select 字段存在指定选项；失败时返回 False，不抛错。"""
+        if not option_name:
+            return False
+        schema = self.get_database_schema(database_id)
+        properties = schema.get("properties", {})
+        prop = properties.get(property_name)
+        if not prop or prop.get("type") != "select":
+            return False
+
+        options = prop.get("select", {}).get("options", [])
+        if any(x.get("name") == option_name for x in options):
+            return True
+
+        try:
+            new_options = [{"name": x.get("name"), "color": x.get("color", "default")} for x in options]
+            new_options.append({"name": option_name, "color": "default"})
+            self.client.databases.update(
+                database_id=database_id,
+                properties={
+                    property_name: {
+                        "select": {
+                            "options": new_options
+                        }
+                    }
+                },
+            )
+            self.__db_schema_cache.pop(database_id, None)
+            return True
+        except APIResponseError as e:
+            print(f"  无法为 {property_name} 添加选项 {option_name}: {e}")
+            return False
 
     def get_week_relation_id(self, date):
         year = date.isocalendar().year
@@ -137,93 +181,124 @@ class NotionHelper:
         week = f"{year}年第{week}周"
         start, end = get_first_and_last_day_of_week(date)
         properties = {"日期": get_date(format_date(start), format_date(end))}
-        return self.get_relation_id(
-            week, self.week_database_id, TARGET_ICON_URL, properties
-        )
+        return self.get_relation_id(week, self.week_database_id, TARGET_ICON_URL, properties)
 
     def get_month_relation_id(self, date):
         month = date.strftime("%Y年%-m月")
         start, end = get_first_and_last_day_of_month(date)
         properties = {"日期": get_date(format_date(start), format_date(end))}
-        return self.get_relation_id(
-            month, self.month_database_id, TARGET_ICON_URL, properties
-        )
+        return self.get_relation_id(month, self.month_database_id, TARGET_ICON_URL, properties)
 
     def get_year_relation_id(self, date):
         year = date.strftime("%Y")
         start, end = get_first_and_last_day_of_year(date)
         properties = {"日期": get_date(format_date(start), format_date(end))}
-        return self.get_relation_id(
-            year, self.year_database_id, TARGET_ICON_URL, properties
-        )
+        return self.get_relation_id(year, self.year_database_id, TARGET_ICON_URL, properties)
 
     def get_day_relation_id(self, date):
         new_date = date.replace(hour=0, minute=0, second=0, microsecond=0)
         day = new_date.strftime("%Y年%m月%d日")
-        properties = {
-            "日期": get_date(format_date(date)),
-        }
-        properties["年"] = get_relation(
-            [
-                self.get_year_relation_id(new_date),
-            ]
-        )
-        properties["月"] = get_relation(
-            [
-                self.get_month_relation_id(new_date),
-            ]
-        )
-        properties["周"] = get_relation(
-            [
-                self.get_week_relation_id(new_date),
-            ]
-        )
-        return self.get_relation_id(
-            day, self.day_database_id, TARGET_ICON_URL, properties
-        )
-    
-    def update_movie_database(self):
-        """更新数据库"""
-        response = self.client.databases.retrieve(database_id=self.movie_database_id)
-        id = response.get("id")
-        properties = response.get("properties")
-        update_properties = {}
-        if (
-            properties.get("Actor") is None
-            or properties.get("Actor").get("type") != "relation"
-        ):
-            update_properties["Actor"] = {"relation": {"database_id": self.actor_database_id,"dual_property":{}}}
-        if (
-            properties.get("IMDB") is None
-            or properties.get("IMDB").get("type") != "rich_text"
-        ):
-            update_properties["IMDB"] = {"rich_text": {}}
-        if len(update_properties) > 0:
-            self.client.databases.update(database_id=id, properties=update_properties)
-    
+        properties = {"日期": get_date(format_date(date))}
+        properties["年"] = get_relation([self.get_year_relation_id(new_date)])
+        properties["月"] = get_relation([self.get_month_relation_id(new_date)])
+        properties["周"] = get_relation([self.get_week_relation_id(new_date)])
+        return self.get_relation_id(day, self.day_database_id, TARGET_ICON_URL, properties)
+
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
-    def get_relation_id(self, name, id, icon, properties={}):
+    def get_relation_id(self, name, id, icon, properties={}, person_info=None):
+        """获取或创建关系实体的ID（Actor/Director/Category 等）"""
         key = f"{id}{name}"
         if key in self.__cache:
             return self.__cache.get(key)
-        filter = {"property": "标题", "title": {"equals": name}}
+        filter = {"property": "Name", "title": {"equals": name}}
         response = self.client.databases.query(database_id=id, filter=filter)
         if len(response.get("results")) == 0:
             parent = {"database_id": id, "type": "database_id"}
-            properties["标题"] = get_title(name)
-            page_id = self.client.pages.create(
-                parent=parent, properties=properties, icon=get_icon(icon)
-            ).get("id")
+            properties["Name"] = get_title(name)
+
+            if person_info:
+                if person_info.get('c_name'):
+                    properties["C-Name"] = get_rich_text(person_info['c_name'])
+                if person_info.get('photo'):
+                    properties["Photo"] = {
+                        "files": [{"type": "external", "name": "Photo", "external": {"url": person_info['photo']}}]
+                    }
+                if person_info.get('nation'):
+                    properties["Nation"] = {"select": {"name": person_info['nation']}}
+                if person_info.get('imdb_id'):
+                    properties["IMDB"] = get_rich_text(person_info['imdb_id'])
+                if person_info.get('bio'):
+                    properties["Bio"] = get_rich_text(person_info['bio'])
+
+            page_icon = get_icon(icon) if icon else None
+            page_cover = None
+            if person_info and person_info.get('photo'):
+                page_icon = get_icon(person_info['photo'])
+                page_cover = get_icon(person_info['photo'])
+
+            create_params = {"parent": parent, "properties": properties}
+            if page_icon:
+                create_params["icon"] = page_icon
+            if page_cover:
+                create_params["cover"] = page_cover
+
+            page_id = self.client.pages.create(**create_params).get("id")
         else:
             page_id = response.get("results")[0].get("id")
+            if person_info:
+                self._update_person_page_if_needed(page_id, person_info)
         self.__cache[key] = page_id
         return page_id
 
+    def _update_person_page_if_needed(self, page_id, person_info):
+        page = self.client.pages.retrieve(page_id=page_id)
+        page_properties = page.get("properties", {})
+        update_properties = {}
+        update_page_payload = {"page_id": page_id}
 
+        c_name = person_info.get("c_name")
+        if c_name and "C-Name" in page_properties:
+            current_c_name = page_properties["C-Name"].get("rich_text", [])
+            current_c_name = current_c_name[0].get("plain_text") if current_c_name else None
+            if not current_c_name:
+                update_properties["C-Name"] = get_rich_text(c_name)
 
-    @retry(stop_max_attempt_number=3, wait_fixed=5000)
-    def update_book_page(self, page_id, properties):
-        return self.client.pages.update(page_id=page_id, properties=properties)
+        photo = person_info.get("photo")
+        if photo and "Photo" in page_properties:
+            current_photo = page_properties["Photo"].get("files", [])
+            current_photo_url = None
+            if current_photo:
+                current_photo_url = (current_photo[0].get("external") or {}).get("url")
+            if not current_photo_url:
+                update_properties["Photo"] = {
+                    "files": [{"type": "external", "name": "Photo", "external": {"url": photo}}]
+                }
+                update_page_payload["icon"] = get_icon(photo)
+                update_page_payload["cover"] = get_icon(photo)
+
+        nation = person_info.get("nation")
+        if nation and "Nation" in page_properties:
+            current_nation = (page_properties["Nation"].get("select") or {}).get("name")
+            if not current_nation:
+                update_properties["Nation"] = {"select": {"name": nation}}
+
+        imdb_id = person_info.get("imdb_id")
+        if imdb_id and "IMDB" in page_properties:
+            current_imdb = page_properties["IMDB"].get("rich_text", [])
+            current_imdb = current_imdb[0].get("plain_text") if current_imdb else None
+            if not current_imdb:
+                update_properties["IMDB"] = get_rich_text(imdb_id)
+
+        bio = person_info.get("bio")
+        if bio and "Bio" in page_properties:
+            current_bio = page_properties["Bio"].get("rich_text", [])
+            current_bio = current_bio[0].get("plain_text") if current_bio else None
+            if not current_bio:
+                update_properties["Bio"] = get_rich_text(bio)
+
+        if update_properties:
+            update_page_payload["properties"] = update_properties
+            self.client.pages.update(**update_page_payload)
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def update_page(self, page_id, properties, icon=None):
@@ -233,21 +308,6 @@ class NotionHelper:
         return self.client.pages.update(**update_data)
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
-    def get_database_schema(self, database_id):
-        """获取数据库的schema信息"""
-        try:
-            database = self.client.databases.retrieve(database_id=database_id)
-            properties = database.get("properties", {})
-            return {
-                "property_count": len(properties),
-                "properties": list(properties.keys()),
-                "property_types": {k: v.get("type") for k, v in properties.items()}
-            }
-        except Exception as e:
-            print(f"获取数据库schema失败: {str(e)}")
-            return None
-
-    @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def create_page(self, parent, properties, icon):
         try:
             if icon:
@@ -255,65 +315,10 @@ class NotionHelper:
             else:
                 return self.client.pages.create(parent=parent, properties=properties)
         except Exception as e:
-            error_msg = str(e)
-            print(f"创建页面失败: {error_msg}")
-            # 如果是数据库schema大小超限错误，尝试使用最小属性集
-            if "database schema has exceeded the maximum size" in error_msg.lower():
-                print(f"警告: 数据库schema已达到最大限制。")
-                
-                # 获取数据库schema信息
-                database_id = parent.get("database_id")
-                if database_id:
-                    schema_info = self.get_database_schema(database_id)
-                    if schema_info:
-                        print(f"  数据库当前属性数量: {schema_info['property_count']}/100 (Notion限制)")
-                        print(f"  数据库已有属性: {schema_info['properties']}")
-                
-                # 详细调试信息
-                print(f"调试信息 - Schema大小超限:")
-                print(f"  尝试发送的属性数量: {len(properties)}")
-                print(f"  尝试发送的属性名称: {list(properties.keys())}")
-                
-                # 尝试使用最小属性集（只保留核心必需属性）
-                minimal_properties = self._get_minimal_properties(properties)
-                if minimal_properties and len(minimal_properties) < len(properties):
-                    print(f"  尝试使用最小属性集 ({len(minimal_properties)} 个属性): {list(minimal_properties.keys())}")
-                    try:
-                        if icon:
-                            return self.client.pages.create(parent=parent, properties=minimal_properties, icon=icon)
-                        else:
-                            return self.client.pages.create(parent=parent, properties=minimal_properties)
-                    except Exception as e2:
-                        print(f"  使用最小属性集也失败: {str(e2)}")
-                
-                # 统计每个属性的数据大小
-                for key, value in properties.items():
-                    if isinstance(value, dict):
-                        if "relation" in value:
-                            print(f"  {key} (relation): {len(value['relation'])} 个关系")
-                        elif "multi_select" in value:
-                            print(f"  {key} (multi_select): {len(value['multi_select'])} 个选项")
-                        elif "files" in value:
-                            print(f"  {key} (files): {len(value['files'])} 个文件")
-                        else:
-                            print(f"  {key}: {type(value).__name__}")
-                
-                print(f"建议: 请在Notion中删除一些不必要的数据库属性，或创建新的数据库。")
-                return None
+            print(f"创建页面失败: {str(e)}")
             print(f"Parent: {parent}")
-            print(f"Properties: {properties}")
-            print(f"Icon: {icon}")
+            print(f"Properties: {list(properties.keys())}")
             raise e
-
-    def _get_minimal_properties(self, properties):
-        """获取最小属性集（只保留核心必需属性）"""
-        # 核心必需属性：Name, Url, Date, Status
-        essential_keys = ["Name", "Url", "Date", "Status"]
-        minimal = {}
-        for key in essential_keys:
-            if key in properties:
-                minimal[key] = properties[key]
-        return minimal
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def query(self, **kwargs):
@@ -338,7 +343,6 @@ class NotionHelper:
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def delete_block(self, block_id):
         return self.client.blocks.delete(block_id=block_id)
-
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def query_all_by_book(self, database_id, filter):
@@ -375,28 +379,4 @@ class NotionHelper:
         return results
 
     def get_date_relation(self, properties, date):
-        """
-        禁用日期关系功能（日/周/月/年数据库）
-        如果需要启用，请取消下面代码的注释并确保Notion中存在对应的数据库
-        """
-        # properties["年"] = get_relation(
-        #     [
-        #         self.get_year_relation_id(date),
-        #     ]
-        # )
-        # properties["月"] = get_relation(
-        #     [
-        #         self.get_month_relation_id(date),
-        #     ]
-        # )
-        # properties["周"] = get_relation(
-        #     [
-        #         self.get_week_relation_id(date),
-        #     ]
-        # )
-        # properties["日"] = get_relation(
-        #     [
-        #         self.get_day_relation_id(date),
-        #     ]
-        # )
         pass
