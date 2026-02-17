@@ -331,7 +331,9 @@ def insert_movie(douban_name,notion_helper):
                             actor_ids.append(notion_helper.get_relation_id(
                                 actor['name'], notion_helper.actor_database_id, USER_ICON_URL, {}, person_info
                             ))
-                        movie["Actor"] = _ensure_actor_relations(actor_ids, subject, notion_helper)
+                        movie["Actor"] = _ensure_actor_relations(
+                            actor_ids, subject, notion_helper, allow_douban_fallback=False
+                        )
 
                 # ── Director ─────────────────────────────────────────
                 if is_chinese:
@@ -517,7 +519,9 @@ def insert_movie(douban_name,notion_helper):
                                 person_info
                             )
                             actor_relations.append(actor_id)
-                        movie["Actor"] = _ensure_actor_relations(actor_relations, subject, notion_helper)
+                        movie["Actor"] = _ensure_actor_relations(
+                            actor_relations, subject, notion_helper, allow_douban_fallback=False
+                        )
 
                     if cast_crew['directors']:
                         director_relations = []
@@ -607,7 +611,9 @@ def insert_movie(douban_name,notion_helper):
                                 person_info
                             )
                             actor_relations.append(actor_id)
-                        movie["Actor"] = _ensure_actor_relations(actor_relations, subject, notion_helper)
+                        movie["Actor"] = _ensure_actor_relations(
+                            actor_relations, subject, notion_helper, allow_douban_fallback=False
+                        )
 
                     # 添加导演（IMDB数据，包含详细信息和豆瓣中文名）
                     if cast_crew['directors']:
@@ -785,11 +791,11 @@ def _normalize_full_title(title):
     return text
 
 
-def _ensure_actor_relations(actor_ids, subject, notion_helper):
-    """如果IMDB演员不足5个，用豆瓣演员补齐关系数量。"""
+def _ensure_actor_relations(actor_ids, subject, notion_helper, allow_douban_fallback=True):
+    """补齐演员关系数量；可选择是否允许用豆瓣演员兜底。"""
     if not isinstance(actor_ids, list):
         actor_ids = []
-    if len(actor_ids) >= MAX_ACTORS_RELATION:
+    if len(actor_ids) >= MAX_ACTORS_RELATION or not allow_douban_fallback:
         return actor_ids
 
     for actor in (subject.get("actors") or []):
