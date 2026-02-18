@@ -51,6 +51,10 @@ headers = {
     "referer": "https://servicewechat.com/wx2f9b06c1de1ccfca/84/page-frame.html",
 }
 
+# 外链封面可用性缓存，避免重复网络探测
+COVER_URL_VALIDITY_CACHE = {}
+AUTHOR_PHOTO_CACHE = {}
+
 # 豆瓣中文标题 -> IMDB英文检索词（通过环境变量配置，避免硬编码样本数据）
 DEFAULT_IMDB_TITLE_ALIAS_MAP = {}
 
@@ -959,7 +963,7 @@ def get_imdb_person_info(person_id):
                     if isinstance(data, dict):
                         if 'name' in data and not result['name']:
                             result['name'] = data['name']
-                        if 'image' in data and not result['photo']:
+                        if 'image' in data and not result['photo'] and _is_valid_image_url(data['image']):
                             result['photo'] = data['image']
                         if 'birthPlace' in data:
                             # birthPlace可能是字符串或对象
@@ -989,6 +993,9 @@ def get_imdb_person_info(person_id):
 
     except Exception as e:
         print(f"  获取人物信息失败 ({person_id}): {str(e)[:50]}")
+
+    if result.get('photo') and not _is_valid_image_url(result.get('photo')):
+        result['photo'] = None
 
     return result if (result['name'] or result['photo']) else None
 
@@ -1169,7 +1176,8 @@ def get_imdb_info(imdb_id):
                 poster_url = poster['src']
                 if '@._' in poster_url:
                     poster_url = poster_url.split('@._')[0] + '@.jpg'
-                result['poster'] = poster_url
+                if _is_valid_image_url(poster_url):
+                    result['poster'] = poster_url
 
             # 标题：优先从 h1 获取（IMDB h1 显示英文/本地化标题，JSON-LD 可能返回原语言罗马化）
             title_tag = soup.find('h1')
@@ -1191,7 +1199,7 @@ def get_imdb_info(imdb_id):
                             if rating_value:
                                 result['rating'] = float(rating_value)
                         # 获取海报
-                        if 'image' in data and not result['poster']:
+                        if 'image' in data and not result['poster'] and _is_valid_image_url(data['image']):
                             result['poster'] = data['image']
                 except:
                     continue
@@ -1265,7 +1273,163 @@ def get_goodreads_cover(title, author=None, isbn=None):
         print(f"从Goodreads获取封面失败 ({title}): {str(e)[:100]}")
     return None
 
-def insert_book(douban_name,notion_helper):
+
+def _is_valid_image_url(url):
+    if not url:
+        return False
+    if url in COVER_URL_VALIDITY_CACHE:
+        return COVER_URL_VALIDITY_CACHE[url]
+    try:
+        response = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+            allow_redirects=True,
+            stream=True,
+        )
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        is_valid = response.status_code == 200 and ("image/" in content_type)
+    except Exception:
+        is_valid = False
+    COVER_URL_VALIDITY_CACHE[url] = is_valid
+    return is_valid
+
+
+def _to_webp_variant(url):
+    if not url or url.endswith(".webp"):
+        return url
+    if "." not in url.rsplit("/", 1)[-1]:
+        return url
+    return url.rsplit(".", 1)[0] + ".webp"
+
+
+def _pick_first_valid_cover(candidates):
+    for candidate in candidates:
+        if candidate and _is_valid_image_url(candidate):
+            return candidate
+    return None
+
+
+def _get_douban_book_cover(subject):
+    pic = subject.get("pic") or {}
+    candidates = []
+    for key in ("large", "normal", "small"):
+        url = pic.get(key)
+        if not url:
+            continue
+        # 先试原链接，再试webp变体，兼容豆瓣图片迁移
+        candidates.append(url)
+        webp_url = _to_webp_variant(url)
+        if webp_url != url:
+            candidates.append(webp_url)
+    return _pick_first_valid_cover(candidates)
+
+
+def _get_openlibrary_cover(isbn):
+    if not isbn:
+        return None
+    candidates = [
+        f"https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg?default=false",
+        f"https://covers.openlibrary.org/b/isbn/{isbn}-M.jpg?default=false",
+    ]
+    return _pick_first_valid_cover(candidates)
+
+
+def _get_openlibrary_author_photo(author_name):
+    if not author_name:
+        return None
+    if author_name in AUTHOR_PHOTO_CACHE:
+        return AUTHOR_PHOTO_CACHE[author_name]
+    try:
+        response = requests.get(
+            "https://openlibrary.org/search/authors.json",
+            params={"q": author_name},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+        if response.status_code != 200:
+            AUTHOR_PHOTO_CACHE[author_name] = None
+            return None
+        for doc in (response.json().get("docs") or []):
+            author_key = doc.get("key")
+            if not author_key:
+                continue
+            author_id = author_key.strip("/").split("/")[-1]
+            detail = requests.get(
+                f"https://openlibrary.org/authors/{author_id}.json",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10,
+            )
+            if detail.status_code != 200:
+                continue
+            for photo_id in (detail.json().get("photos") or []):
+                url = f"https://covers.openlibrary.org/a/id/{photo_id}-L.jpg?default=false"
+                if _is_valid_image_url(url):
+                    AUTHOR_PHOTO_CACHE[author_name] = url
+                    return url
+    except Exception:
+        pass
+    AUTHOR_PHOTO_CACHE[author_name] = None
+    return None
+
+
+def _get_book_cover(subject, title):
+    isbn = subject.get("isbn")
+    authors = subject.get("author") or []
+    author_name = authors[0] if authors else None
+    goodreads_cover = get_goodreads_cover(title, author=author_name, isbn=isbn)
+    if _is_valid_image_url(goodreads_cover):
+        return goodreads_cover
+    douban_cover = _get_douban_book_cover(subject)
+    if douban_cover:
+        return douban_cover
+    return _get_openlibrary_cover(isbn)
+
+
+def _extract_book_year(subject):
+    for date_str in subject.get("pubdate") or []:
+        year_match = re.search(r"\d{4}", date_str)
+        if year_match:
+            return year_match.group()
+    return None
+
+
+def _extract_publisher_list(subject):
+    press = []
+    for item in subject.get("press") or []:
+        press.extend(x.strip() for x in str(item).split(",") if x.strip())
+    return press[0:MAX_PUBLISHERS_MULTI_SELECT]
+
+
+def _normalize_relation_ids(value):
+    if not isinstance(value, list):
+        return []
+    ids = []
+    for item in value:
+        if isinstance(item, dict):
+            item_id = item.get("id")
+            if item_id:
+                ids.append(item_id)
+        elif item:
+            ids.append(item)
+    return sorted(ids)
+
+
+def _normalize_multi_select_names(value):
+    if not isinstance(value, list):
+        return []
+    names = []
+    for item in value:
+        if isinstance(item, dict):
+            name = item.get("name")
+            if name:
+                names.append(name)
+        elif item:
+            names.append(item)
+    return sorted(names)
+
+
+def insert_book(douban_name, notion_helper):
     notion_books = notion_helper.query_all(database_id=notion_helper.book_database_id)
     notion_book_dict = {}
     for i in notion_books:
@@ -1274,11 +1438,20 @@ def insert_book(douban_name,notion_helper):
             book[key] = utils.get_property_value(value)
         db_url = book.get("DB_Url") or book.get("Url")
         notion_book_dict[db_url] = {
+            "Name": book.get("Name"),
             "Remark": book.get("Remark"),
             "Status": book.get("Status"),
             "Date": book.get("Date"),
             "Rating": book.get("Rating"),
             "Cover": book.get("Cover"),
+            "ISBN": book.get("ISBN"),
+            "Intro": book.get("Intro"),
+            "DoubanRating": book.get("DoubanRating"),
+            "Raters": book.get("Raters"),
+            "Year": book.get("Year"),
+            "Author": _normalize_relation_ids(book.get("Author")),
+            "Category": _normalize_relation_ids(book.get("Category")),
+            "Publisher": _normalize_multi_select_names(book.get("Publisher")),
             "page_id": i.get("id"),
         }
     print(f"notion {len(notion_book_dict)}")
@@ -1290,106 +1463,85 @@ def insert_book(douban_name,notion_helper):
         if not result:
             continue
         subject = result.get("subject")
-        book["Name"] = subject.get("title")
-        create_time = result.get("create_time")
-        create_time = pendulum.parse(create_time,tz=utils.tz)
-        #时间上传到Notion会丢掉秒的信息，这里直接将秒设置为0
+        create_time = pendulum.parse(result.get("create_time"), tz=utils.tz)
         create_time = create_time.replace(second=0)
+
+        book["Name"] = subject.get("title")
         book["Date"] = create_time.int_timestamp
         book["DB_Url"] = subject.get("url")
         book["Status"] = book_status.get(result.get("status"))
-
-        # 尝试从Goodreads获取封面
-        isbn = subject.get("isbn")
-        authors = subject.get("author", [])
-        author_name = authors[0] if authors else None
-        cover = get_goodreads_cover(book.get("Name"), author=author_name, isbn=isbn)
-
-        # 如果Goodreads获取失败，回退到豆瓣封面
-        if not cover:
-            cover = subject.get("pic").get("large")
-            if cover and not cover.endswith('.webp'):
-                cover = cover.rsplit('.', 1)[0] + '.webp'
-
-        book["Cover"] = cover
+        book["Cover"] = _get_book_cover(subject, book.get("Name"))
+        book["ISBN"] = subject.get("isbn")
+        book["Intro"] = subject.get("intro")
+        book["Publisher"] = _extract_publisher_list(subject)
+        if subject.get("tags"):
+            book["Category"] = [
+                notion_helper.get_relation_id(x, notion_helper.category_database_id, TAG_ICON_URL)
+                for x in subject.get("tags")[0:MAX_CATEGORIES_RELATION]
+            ]
+        if subject.get("author"):
+            author_ids = []
+            for author_name in subject.get("author")[0:MAX_AUTHORS_RELATION]:
+                author_photo = _get_openlibrary_author_photo(author_name)
+                person_info = {"photo": author_photo} if author_photo else None
+                author_ids.append(
+                    notion_helper.get_relation_id(
+                        author_name, notion_helper.author_database_id, USER_ICON_URL, {}, person_info
+                    )
+                )
+            book["Author"] = author_ids
         if result.get("rating"):
             book["Rating"] = rating.get(result.get("rating").get("value"))
         if result.get("comment"):
             book["Remark"] = result.get("comment")
-        if notion_book_dict.get(book.get("DB_Url")):
-            notion_movive = notion_book_dict.get(book.get("DB_Url"))
-            if (
-                notion_movive.get("Cover") is None
-                or notion_movive.get("Cover") != book.get("Cover")
-                or notion_movive.get("Date") != book.get("Date")
-                or notion_movive.get("Remark") != book.get("Remark")
-                or notion_movive.get("Status") != book.get("Status")
-                or notion_movive.get("Rating") != book.get("Rating")
-            ):
+        if subject.get("rating"):
+            book["DoubanRating"] = subject.get("rating").get("value", 0)
+            book["Raters"] = subject.get("rating").get("count", 0)
+        year = _extract_book_year(subject)
+        if year:
+            book["Year"] = year
+
+        existing_book = notion_book_dict.get(book.get("DB_Url"))
+        if existing_book:
+            # 新封面抓取失败时保留旧封面，避免把已有封面覆盖成空
+            if not book.get("Cover") and existing_book.get("Cover"):
+                book["Cover"] = existing_book.get("Cover")
+            needs_update = (
+                existing_book.get("Cover") != book.get("Cover")
+                or existing_book.get("Date") != book.get("Date")
+                or existing_book.get("Remark") != book.get("Remark")
+                or existing_book.get("Status") != book.get("Status")
+                or existing_book.get("Rating") != book.get("Rating")
+                or existing_book.get("ISBN") != book.get("ISBN")
+                or existing_book.get("Intro") != book.get("Intro")
+                or existing_book.get("DoubanRating") != book.get("DoubanRating")
+                or existing_book.get("Raters") != book.get("Raters")
+                or existing_book.get("Year") != book.get("Year")
+                or existing_book.get("Author") != _normalize_relation_ids(book.get("Author"))
+                or existing_book.get("Category") != _normalize_relation_ids(book.get("Category"))
+                or existing_book.get("Publisher") != _normalize_multi_select_names(book.get("Publisher"))
+            )
+            if needs_update:
                 print(f"更新{book.get('Name')}")
                 properties = utils.get_properties(book, book_properties_type_dict)
-                notion_helper.get_date_relation(properties,create_time)
+                notion_helper.get_date_relation(properties, create_time)
+                icon = get_icon(book.get("Cover")) if book.get("Cover") else None
                 notion_helper.update_page(
-                    page_id=notion_movive.get("page_id"),
-                    properties=properties
-            )
+                    page_id=existing_book.get("page_id"),
+                    properties=properties,
+                    icon=icon,
+                )
 
         else:
             print(f"插入{book.get('Name')}")
-            book["Intro"] = subject.get("intro")
-
-            # 获取ISBN和作者信息
-            isbn = subject.get("isbn")
-            authors = subject.get("author", [])
-            author_name = authors[0] if authors else None
-
-            # 优先尝试从Goodreads获取封面
-            cover = get_goodreads_cover(book.get("Name"), author=author_name, isbn=isbn)
-
-            # 如果Goodreads获取失败，回退到豆瓣封面
-            if not cover:
-                print(f"  Goodreads封面获取失败，使用豆瓣封面")
-                cover = subject.get("pic").get("large")
-                if cover and not cover.endswith('.webp'):
-                    cover = cover.rsplit('.', 1)[0] + '.webp'
-
-            book["Cover"] = cover
-
-            press = []
-            for i in subject.get("press"):
-                press.extend(i.split(","))
-            book["Publisher"] = press[0:MAX_PUBLISHERS_MULTI_SELECT]
-            if result.get("tags"):
-                book["Category"] = [
-                    notion_helper.get_relation_id(
-                        x, notion_helper.category_database_id, TAG_ICON_URL
-                    )
-                    for x in result.get("tags")[0:MAX_CATEGORIES_RELATION]
-                ]
-            if subject.get("author"):
-                book["Author"] = [
-                    notion_helper.get_relation_id(
-                        x, notion_helper.author_database_id, USER_ICON_URL
-                    )
-                    for x in subject.get("author")[0:MAX_AUTHORS_RELATION]
-                ]
-            if subject.get("rating"):
-                book["DoubanRating"] = subject.get("rating").get("value", 0)
-                book["Raters"] = subject.get("rating").get("count", 0)
-            if subject.get("pubdate"):
-                for date_str in subject.get("pubdate"):
-                    year_match = re.search(r'\d{4}', date_str)
-                    if year_match:
-                        book["Year"] = year_match.group()
-                        break
             properties = utils.get_properties(book, book_properties_type_dict)
-            notion_helper.get_date_relation(properties,create_time)
+            notion_helper.get_date_relation(properties, create_time)
             parent = {
                 "database_id": notion_helper.book_database_id,
                 "type": "database_id",
             }
             notion_helper.create_page(
-                parent=parent, properties=properties, icon=get_icon(cover)
+                parent=parent, properties=properties, icon=get_icon(book.get("Cover"))
             )
 
 

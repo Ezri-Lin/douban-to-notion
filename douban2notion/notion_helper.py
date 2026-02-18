@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import requests
 
 from notion_client import Client
 from notion_client.errors import APIResponseError
@@ -39,6 +40,7 @@ class NotionHelper:
     }
     database_id_dict = {}
     image_dict = {}
+    __url_validity_cache = {}
 
     def __init__(self, type):
         is_movie = True if type == "movie" else False
@@ -204,9 +206,31 @@ class NotionHelper:
         properties["周"] = get_relation([self.get_week_relation_id(new_date)])
         return self.get_relation_id(day, self.day_database_id, TARGET_ICON_URL, properties)
 
+    def _is_valid_image_url(self, url):
+        if not url:
+            return False
+        if url in self.__url_validity_cache:
+            return self.__url_validity_cache[url]
+        try:
+            response = requests.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10,
+                allow_redirects=True,
+                stream=True,
+            )
+            content_type = (response.headers.get("Content-Type") or "").lower()
+            ok = response.status_code == 200 and "image/" in content_type
+        except Exception:
+            ok = False
+        self.__url_validity_cache[url] = ok
+        return ok
+
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
-    def get_relation_id(self, name, id, icon, properties={}, person_info=None):
+    def get_relation_id(self, name, id, icon, properties=None, person_info=None):
         """获取或创建关系实体的ID（Actor/Director/Category 等）"""
+        if properties is None:
+            properties = {}
         key = f"{id}{name}"
         if key in self.__cache:
             return self.__cache.get(key)
@@ -215,19 +239,20 @@ class NotionHelper:
         if len(response.get("results")) == 0:
             parent = {"database_id": id, "type": "database_id"}
             properties["Name"] = get_title(name)
+            db_properties = (self.get_database_schema(id).get("properties") or {})
 
             if person_info:
-                if person_info.get('c_name'):
+                if person_info.get('c_name') and "C-Name" in db_properties:
                     properties["C-Name"] = get_rich_text(person_info['c_name'])
-                if person_info.get('photo'):
+                if person_info.get('photo') and "Photo" in db_properties:
                     properties["Photo"] = {
                         "files": [{"type": "external", "name": "Photo", "external": {"url": person_info['photo']}}]
                     }
-                if person_info.get('nation'):
+                if person_info.get('nation') and "Nation" in db_properties:
                     properties["Nation"] = {"select": {"name": person_info['nation']}}
-                if person_info.get('imdb_id'):
+                if person_info.get('imdb_id') and "IMDB" in db_properties:
                     properties["IMDB"] = get_rich_text(person_info['imdb_id'])
-                if person_info.get('bio'):
+                if person_info.get('bio') and "Bio" in db_properties:
                     properties["Bio"] = get_rich_text(person_info['bio'])
 
             page_icon = get_icon(icon) if icon else None
@@ -269,11 +294,16 @@ class NotionHelper:
             current_photo_url = None
             if current_photo:
                 current_photo_url = (current_photo[0].get("external") or {}).get("url")
-            if not current_photo_url:
+            if (not current_photo_url) or (not self._is_valid_image_url(current_photo_url)):
                 update_properties["Photo"] = {
                     "files": [{"type": "external", "name": "Photo", "external": {"url": photo}}]
                 }
+        if photo:
+            icon_url = ((page.get("icon") or {}).get("external") or {}).get("url")
+            cover_url = ((page.get("cover") or {}).get("external") or {}).get("url")
+            if (not icon_url) or (not self._is_valid_image_url(icon_url)):
                 update_page_payload["icon"] = get_icon(photo)
+            if (not cover_url) or (not self._is_valid_image_url(cover_url)):
                 update_page_payload["cover"] = get_icon(photo)
 
         nation = person_info.get("nation")
@@ -343,23 +373,6 @@ class NotionHelper:
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def delete_block(self, block_id):
         return self.client.blocks.delete(block_id=block_id)
-
-    @retry(stop_max_attempt_number=3, wait_fixed=5000)
-    def query_all_by_book(self, database_id, filter):
-        results = []
-        has_more = True
-        start_cursor = None
-        while has_more:
-            response = self.client.databases.query(
-                database_id=database_id,
-                filter=filter,
-                start_cursor=start_cursor,
-                page_size=100,
-            )
-            start_cursor = response.get("next_cursor")
-            has_more = response.get("has_more")
-            results.extend(response.get("results"))
-        return results
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def query_all(self, database_id):
