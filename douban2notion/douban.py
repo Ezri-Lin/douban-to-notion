@@ -247,7 +247,7 @@ def insert_movie(douban_name,notion_helper):
                 imdb_info = get_imdb_info(imdb_id)
                 movie["IMDB"] = imdb_id
                 movie["IMDB_Url"] = f"https://www.imdb.com/title/{imdb_id}/"
-                if _should_force_foreign_by_imdb(douban_title, (imdb_info or {}).get("title")):
+                if _should_force_foreign_by_imdb(douban_title, (imdb_info or {}).get("title"), countries):
                     is_chinese = False
 
             # ── 计算正确的 Name / MovieName / Cover ─────────────────
@@ -492,7 +492,7 @@ def insert_movie(douban_name,notion_helper):
                 movie["IMDB"] = imdb_id
                 movie["IMDB_Url"] = f"https://www.imdb.com/title/{imdb_id}/"
                 imdb_info = get_imdb_info(imdb_id)
-                if _should_force_foreign_by_imdb(douban_title, (imdb_info or {}).get("title")):
+                if _should_force_foreign_by_imdb(douban_title, (imdb_info or {}).get("title"), countries):
                     is_chinese = False
 
             # ── 设置 Name / MovieName ────────────────────────────────
@@ -917,12 +917,22 @@ def _has_latin(text):
     return bool(text) and re.search(r"[A-Za-z]", str(text)) is not None
 
 
-def _should_force_foreign_by_imdb(douban_title, imdb_title):
+def _is_chinese_region_first(countries):
+    if not countries:
+        return False
+    first_country = countries[0] if isinstance(countries, list) else str(countries).split()[0]
+    chinese_regions = ["中国大陆", "中国香港", "中国台湾", "中国", "香港", "台湾", "China", "Hong Kong", "Taiwan"]
+    return any(region in str(first_country) for region in chinese_regions)
+
+
+def _should_force_foreign_by_imdb(douban_title, imdb_title, countries=None):
     """
     当豆瓣语言判定不稳定时，用 IMDb 标题兜底：
     - IMDb 标题明显是拉丁字母且非中文
     - 且与豆瓣标题不是同一字符串
     """
+    if _is_chinese_region_first(countries):
+        return False
     if not imdb_title:
         return False
     if not _has_latin(imdb_title) or _has_chinese(imdb_title):
