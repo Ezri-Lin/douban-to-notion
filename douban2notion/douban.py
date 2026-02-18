@@ -127,12 +127,14 @@ def fetch_subjects(user, type_, status):
 def insert_movie(douban_name,notion_helper):
     notion_movies = notion_helper.query_all(database_id=notion_helper.movie_database_id)
     notion_movie_dict = {}
+    notion_movie_imdb_dict = {}
+    notion_movie_title_year_dict = {}
     for i in notion_movies:
         movie = {}
         for key, value in i.get("properties").items():
             movie[key] = utils.get_property_value(value)
         db_url = movie.get("DB_Url") or movie.get("Url")
-        notion_movie_dict[db_url] = {
+        current_movie = {
             "Remark": movie.get("Remark"),
             "Status": movie.get("Status"),
             "Date": movie.get("Date"),
@@ -143,12 +145,18 @@ def insert_movie(douban_name,notion_helper):
             "IMDB_Url": movie.get("IMDB_Url"),
             "Name": movie.get("Name"),
             "MovieName": movie.get("MovieName"),
+            "Year": movie.get("Year"),
             "Season": movie.get("Season"),
             "Cover": movie.get("Cover"),
             "CoverSource": movie.get("CoverSource"),
             "CoverStatus": movie.get("CoverStatus"),
             "page_id": i.get("id")
         }
+        notion_movie_dict[db_url] = current_movie
+        if current_movie.get("IMDB"):
+            notion_movie_imdb_dict[current_movie.get("IMDB")] = current_movie
+        for unique_key in _build_movie_unique_keys(current_movie.get("Name"), current_movie.get("MovieName"), current_movie.get("Year")):
+            notion_movie_title_year_dict[unique_key] = current_movie
     results = []
     for i in movie_status.keys():
         results.extend(fetch_subjects(douban_name, "movie", i))
@@ -279,7 +287,6 @@ def insert_movie(douban_name,notion_helper):
                 or notion_movive.get("Status") != movie.get("Status")
                 or notion_movive.get("Rating") != movie.get("Rating")
                 or notion_movive.get("Actor") is None
-                or (isinstance(notion_movive.get("Actor"), list) and len(notion_movive.get("Actor")) < MAX_ACTORS_RELATION)
                 or notion_movive.get("Director") is None
                 or not notion_movive.get("IMDB")
                 or current_name != movie.get("Name")
@@ -430,6 +437,29 @@ def insert_movie(douban_name,notion_helper):
                     properties=properties,
                     icon=icon
             )
+                notion_movive.update({
+                    "Remark": movie.get("Remark"),
+                    "Status": movie.get("Status"),
+                    "Date": movie.get("Date"),
+                    "Rating": movie.get("Rating"),
+                    "Actor": movie.get("Actor", notion_movive.get("Actor")),
+                    "Director": movie.get("Director", notion_movive.get("Director")),
+                    "IMDB": movie.get("IMDB", notion_movive.get("IMDB")),
+                    "IMDB_Url": movie.get("IMDB_Url", notion_movive.get("IMDB_Url")),
+                    "Name": movie.get("Name", notion_movive.get("Name")),
+                    "MovieName": movie.get("MovieName", notion_movive.get("MovieName")),
+                    "Year": movie.get("Year", notion_movive.get("Year")),
+                    "Season": movie.get("Season", notion_movive.get("Season")),
+                    "Cover": movie.get("Cover", notion_movive.get("Cover")),
+                    "CoverSource": movie.get("CoverSource", notion_movive.get("CoverSource")),
+                    "CoverStatus": movie.get("CoverStatus", notion_movive.get("CoverStatus")),
+                })
+                if notion_movive.get("IMDB"):
+                    notion_movie_imdb_dict[notion_movive.get("IMDB")] = notion_movive
+                for unique_key in _build_movie_unique_keys(
+                    notion_movive.get("Name"), notion_movive.get("MovieName"), notion_movive.get("Year")
+                ):
+                    notion_movie_title_year_dict[unique_key] = notion_movive
 
         else:
             douban_title = movie.get("_douban_title")
@@ -698,13 +728,56 @@ def insert_movie(douban_name,notion_helper):
                         ]
             properties = utils.get_properties(movie, movie_properties_type_dict)
             notion_helper.get_date_relation(properties,create_time)
+
+            duplicate_movie = None
+            if movie.get("IMDB"):
+                duplicate_movie = notion_movie_imdb_dict.get(movie.get("IMDB"))
+            if not duplicate_movie:
+                for unique_key in _build_movie_unique_keys(movie.get("Name"), movie.get("MovieName"), movie.get("Year")):
+                    duplicate_movie = notion_movie_title_year_dict.get(unique_key)
+                    if duplicate_movie:
+                        break
+            if duplicate_movie:
+                print(f"  命中唯一校验，改为更新: {movie.get('Name')}")
+                icon = get_icon(cover) if cover else None
+                notion_helper.update_page(
+                    page_id=duplicate_movie.get("page_id"),
+                    properties=properties,
+                    icon=icon,
+                )
+                notion_movie_dict[movie.get("DB_Url")] = duplicate_movie
+                continue
+
             parent = {
                 "database_id": notion_helper.movie_database_id,
                 "type": "database_id",
             }
-            notion_helper.create_page(
+            created_page = notion_helper.create_page(
                 parent=parent, properties=properties, icon=get_icon(cover)
             )
+            created_movie = {
+                "Remark": movie.get("Remark"),
+                "Status": movie.get("Status"),
+                "Date": movie.get("Date"),
+                "Rating": movie.get("Rating"),
+                "Actor": movie.get("Actor"),
+                "Director": movie.get("Director"),
+                "IMDB": movie.get("IMDB"),
+                "IMDB_Url": movie.get("IMDB_Url"),
+                "Name": movie.get("Name"),
+                "MovieName": movie.get("MovieName"),
+                "Year": movie.get("Year"),
+                "Season": movie.get("Season"),
+                "Cover": movie.get("Cover"),
+                "CoverSource": movie.get("CoverSource"),
+                "CoverStatus": movie.get("CoverStatus"),
+                "page_id": (created_page or {}).get("id"),
+            }
+            notion_movie_dict[movie.get("DB_Url")] = created_movie
+            if created_movie.get("IMDB"):
+                notion_movie_imdb_dict[created_movie.get("IMDB")] = created_movie
+            for unique_key in _build_movie_unique_keys(created_movie.get("Name"), created_movie.get("MovieName"), created_movie.get("Year")):
+                notion_movie_title_year_dict[unique_key] = created_movie
 
 def get_imdb(link):
     """从豆瓣页面获取IMDB编号（豆瓣已不再显示IMDB信息）"""
@@ -821,6 +894,33 @@ def _normalize_full_title(title):
     text = re.sub(r"\s+", " ", title).strip()
     text = re.sub(r"\s*:\s*", ": ", text)
     return text
+
+
+def _normalize_title_key(text):
+    if not text:
+        return None
+    normalized = re.sub(r"\s+", " ", str(text)).strip().lower()
+    normalized = normalized.replace("：", ":")
+    return normalized
+
+
+def _build_movie_unique_keys(name, movie_name, year):
+    keys = []
+    year_text = str(year or "").strip()
+    for candidate in (name, movie_name):
+        title_key = _normalize_title_key(candidate)
+        if not title_key:
+            continue
+        keys.append(f"{title_key}|{year_text}" if year_text else title_key)
+    # 去重并保持顺序
+    seen = set()
+    result = []
+    for key in keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(key)
+    return result
 
 
 def _ensure_actor_relations(actor_ids, subject, notion_helper, allow_douban_fallback=True):
