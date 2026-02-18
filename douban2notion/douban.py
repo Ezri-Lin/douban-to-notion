@@ -288,8 +288,14 @@ def insert_movie(douban_name,notion_helper):
                 if resolved_foreign_name:
                     movie["Name"] = resolved_foreign_name
                 else:
-                    # Keep existing foreign name to avoid downgrading a manually corrected row.
-                    if _is_foreign_style_name(notion_movive.get("Name"), notion_movive.get("MovieName")):
+                    # Keep existing foreign name only when current IMDB mapping is still trusted.
+                    # If IMDB is missing/replaced after consistency checks, do not preserve stale foreign names.
+                    trusted_existing_foreign = (
+                        _is_foreign_style_name(notion_movive.get("Name"), notion_movive.get("MovieName"))
+                        and notion_movive.get("IMDB")
+                        and notion_movive.get("IMDB") == movie.get("IMDB")
+                    )
+                    if trusted_existing_foreign:
                         movie["Name"] = notion_movive.get("Name")
                     else:
                         movie["Name"] = clean_douban_title
