@@ -240,6 +240,16 @@ def insert_movie(douban_name,notion_helper):
                     if imdb_id:
                         found_by_search = True
                         break
+                if not found_by_search and not is_chinese:
+                    tmdb_imdb_id, tmdb_original_title = search_tmdb_for_imdb(
+                        _strip_season(douban_title), movie.get("Year"), media_type=subtype
+                    )
+                    if tmdb_imdb_id:
+                        imdb_id = tmdb_imdb_id
+                        if not original_title and tmdb_original_title:
+                            original_title = tmdb_original_title
+                        print(f"  TMDB兜底命中IMDB: {imdb_id}")
+                        found_by_search = True
                 if not found_by_search:
                     print(f"  IMDB检索失败: {douban_title} ({movie.get('Year')}, {subtype})")
             imdb_info = None
@@ -484,6 +494,16 @@ def insert_movie(douban_name,notion_helper):
                     if imdb_id:
                         found_by_search = True
                         break
+                if not found_by_search and not is_chinese:
+                    tmdb_imdb_id, tmdb_original_title = search_tmdb_for_imdb(
+                        _strip_season(douban_title), movie.get("Year"), media_type=subtype
+                    )
+                    if tmdb_imdb_id:
+                        imdb_id = tmdb_imdb_id
+                        if not original_title and tmdb_original_title:
+                            original_title = tmdb_original_title
+                        print(f"  TMDB兜底命中IMDB: {imdb_id}")
+                        found_by_search = True
                 if not found_by_search:
                     print(f"  IMDB检索失败: {douban_title} ({movie.get('Year')}, {subtype})")
 
@@ -1099,6 +1119,65 @@ def search_imdb_by_title(title, year=None, media_type="movie"):
     except Exception as e:
         print(f"  IMDB搜索失败: {str(e)[:50]}")
     return None
+
+
+def search_tmdb_for_imdb(title, year=None, media_type="movie"):
+    """TMDB fallback: use Chinese title to find IMDb id + original title."""
+    if not TMDB_API_KEY or not title:
+        return None, None
+    try:
+        is_tv = media_type == "tv"
+        search_type = "tv" if is_tv else "movie"
+        search_url = f"https://api.themoviedb.org/3/search/{search_type}"
+        params = {
+            "api_key": TMDB_API_KEY,
+            "query": title,
+            "language": "zh-CN",
+            "include_adult": "false",
+        }
+        if year and str(year).isdigit():
+            if is_tv:
+                params["first_air_date_year"] = str(year)
+            else:
+                params["year"] = str(year)
+
+        response = requests.get(search_url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
+        if response.status_code != 200:
+            return None, None
+        results = response.json().get("results") or []
+        if not results:
+            return None, None
+
+        # Prefer exact year when possible.
+        chosen = results[0]
+        if year and str(year).isdigit():
+            y = str(year)
+            for item in results[:5]:
+                date_value = item.get("first_air_date") if is_tv else item.get("release_date")
+                if date_value and str(date_value).startswith(y):
+                    chosen = item
+                    break
+
+        tmdb_id = chosen.get("id")
+        if not tmdb_id:
+            return None, None
+        detail_url = f"https://api.themoviedb.org/3/{search_type}/{tmdb_id}"
+        detail_resp = requests.get(
+            detail_url,
+            params={"api_key": TMDB_API_KEY, "append_to_response": "external_ids", "language": "en-US"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=12,
+        )
+        if detail_resp.status_code != 200:
+            return None, None
+        detail = detail_resp.json()
+        imdb_id = ((detail.get("external_ids") or {}).get("imdb_id") or "").strip()
+        if not re.match(r"^tt\d{7,8}$", imdb_id):
+            imdb_id = None
+        original_title = detail.get("original_name") if is_tv else detail.get("original_title")
+        return imdb_id, original_title
+    except Exception:
+        return None, None
 
 
 def _build_tmdb_profile_url(profile_path):
