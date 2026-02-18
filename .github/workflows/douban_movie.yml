@@ -17,6 +17,7 @@ jobs:
         NOTION_MOVIE_URL: ${{ secrets.NOTION_MOVIE_URL }}
         DOUBAN_NAME: ${{ secrets.DOUBAN_NAME }}
         AUTH_TOKEN: ${{ secrets.AUTH_TOKEN }}
+        TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
         YEAR: ${{ vars.YEAR }}
         REF: ${{ github.ref }}
         REPOSITORY: ${{ github.repository }}

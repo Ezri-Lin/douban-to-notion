@@ -19,6 +19,7 @@ jobs:
       BOOK_NOTION_TOKEN: ${{ secrets.BOOK_NOTION_TOKEN }}
       NOTION_MOVIE_URL: ${{ secrets.NOTION_MOVIE_URL }}
       NOTION_BOOK_URL: ${{ secrets.NOTION_BOOK_URL }}
+      TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
