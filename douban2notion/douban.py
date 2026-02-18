@@ -10,6 +10,7 @@ from douban2notion.notion_helper import NotionHelper
 from douban2notion import utils
 DOUBAN_API_HOST = os.getenv("DOUBAN_API_HOST", "frodo.douban.com")
 DOUBAN_API_KEY = os.getenv("DOUBAN_API_KEY", "0ac44ae016490db2204ce0a042db2916")
+TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
 
 from douban2notion.config import (
     movie_properties_type_dict,
@@ -246,6 +247,8 @@ def insert_movie(douban_name,notion_helper):
                 imdb_info = get_imdb_info(imdb_id)
                 movie["IMDB"] = imdb_id
                 movie["IMDB_Url"] = f"https://www.imdb.com/title/{imdb_id}/"
+                if _should_force_foreign_by_imdb(douban_title, (imdb_info or {}).get("title")):
+                    is_chinese = False
 
             # ── 计算正确的 Name / MovieName / Cover ─────────────────
             clean_douban_title = _strip_season(douban_title)
@@ -317,7 +320,7 @@ def insert_movie(douban_name,notion_helper):
                                 nation = get_person_nation_from_birthplace(person_info_data.get('birthplace'))
                                 person_info = {
                                     'photo': person_info_data.get('photo'),
-                                    'photo_source': 'IMDB',
+                                    'photo_source': person_info_data.get('photo_source', 'IMDB'),
                                     'nation': nation,
                                     'imdb_id': actor['id'],
                                     'bio': person_info_data.get('bio'),
@@ -347,7 +350,7 @@ def insert_movie(douban_name,notion_helper):
                                 nation = get_person_nation_from_birthplace(person_info_data.get('birthplace'))
                                 person_info = {
                                     'photo': person_info_data.get('photo'),
-                                    'photo_source': 'IMDB',
+                                    'photo_source': person_info_data.get('photo_source', 'IMDB'),
                                     'nation': nation,
                                     'imdb_id': actor['id'],
                                     'bio': person_info_data.get('bio'),
@@ -374,7 +377,7 @@ def insert_movie(douban_name,notion_helper):
                                 nation = get_person_nation_from_birthplace(person_info_data.get('birthplace'))
                                 person_info = {
                                     'photo': person_info_data.get('photo'),
-                                    'photo_source': 'IMDB',
+                                    'photo_source': person_info_data.get('photo_source', 'IMDB'),
                                     'nation': nation,
                                     'imdb_id': director['id'],
                                     'bio': person_info_data.get('bio'),
@@ -403,7 +406,7 @@ def insert_movie(douban_name,notion_helper):
                                 nation = get_person_nation_from_birthplace(person_info_data.get('birthplace'))
                                 person_info = {
                                     'photo': person_info_data.get('photo'),
-                                    'photo_source': 'IMDB',
+                                    'photo_source': person_info_data.get('photo_source', 'IMDB'),
                                     'nation': nation,
                                     'imdb_id': director['id'],
                                     'bio': person_info_data.get('bio'),
@@ -489,6 +492,8 @@ def insert_movie(douban_name,notion_helper):
                 movie["IMDB"] = imdb_id
                 movie["IMDB_Url"] = f"https://www.imdb.com/title/{imdb_id}/"
                 imdb_info = get_imdb_info(imdb_id)
+                if _should_force_foreign_by_imdb(douban_title, (imdb_info or {}).get("title")):
+                    is_chinese = False
 
             # ── 设置 Name / MovieName ────────────────────────────────
             clean_douban_title = _strip_season(douban_title)
@@ -562,7 +567,7 @@ def insert_movie(douban_name,notion_helper):
                                 )
                                 person_info = {
                                     'photo': person_info_data.get('photo'),
-                                    'photo_source': 'IMDB',
+                                    'photo_source': person_info_data.get('photo_source', 'IMDB'),
                                     'nation': nation,
                                     'imdb_id': actor['id'],
                                     'bio': person_info_data.get('bio'),
@@ -591,7 +596,7 @@ def insert_movie(douban_name,notion_helper):
                                 )
                                 person_info = {
                                     'photo': person_info_data.get('photo'),
-                                    'photo_source': 'IMDB',
+                                    'photo_source': person_info_data.get('photo_source', 'IMDB'),
                                     'nation': nation,
                                     'imdb_id': director['id'],
                                     'bio': person_info_data.get('bio'),
@@ -655,7 +660,7 @@ def insert_movie(douban_name,notion_helper):
                                 )
                                 person_info = {
                                     'photo': person_info_data.get('photo'),
-                                    'photo_source': 'IMDB',
+                                    'photo_source': person_info_data.get('photo_source', 'IMDB'),
                                     'nation': nation,
                                     'imdb_id': actor['id'],
                                     'bio': person_info_data.get('bio'),
@@ -688,7 +693,7 @@ def insert_movie(douban_name,notion_helper):
                                 )
                                 person_info = {
                                     'photo': person_info_data.get('photo'),
-                                    'photo_source': 'IMDB',
+                                    'photo_source': person_info_data.get('photo_source', 'IMDB'),
                                     'nation': nation,
                                     'imdb_id': director['id'],
                                     'bio': person_info_data.get('bio'),
@@ -904,6 +909,31 @@ def _normalize_title_key(text):
     return normalized
 
 
+def _has_chinese(text):
+    return bool(text) and re.search(r"[\u4e00-\u9fff]", str(text)) is not None
+
+
+def _has_latin(text):
+    return bool(text) and re.search(r"[A-Za-z]", str(text)) is not None
+
+
+def _should_force_foreign_by_imdb(douban_title, imdb_title):
+    """
+    当豆瓣语言判定不稳定时，用 IMDb 标题兜底：
+    - IMDb 标题明显是拉丁字母且非中文
+    - 且与豆瓣标题不是同一字符串
+    """
+    if not imdb_title:
+        return False
+    if not _has_latin(imdb_title) or _has_chinese(imdb_title):
+        return False
+    douban_key = _normalize_title_key(douban_title)
+    imdb_key = _normalize_title_key(imdb_title)
+    if not douban_key or not imdb_key:
+        return False
+    return douban_key != imdb_key
+
+
 def _build_movie_unique_keys(name, movie_name, year):
     keys = []
     year_text = str(year or "").strip()
@@ -1060,6 +1090,43 @@ def search_imdb_by_title(title, year=None, media_type="movie"):
         print(f"  IMDB搜索失败: {str(e)[:50]}")
     return None
 
+
+def _build_tmdb_profile_url(profile_path):
+    if not profile_path:
+        return None
+    return f"https://image.tmdb.org/t/p/w500{profile_path}"
+
+
+def get_tmdb_person_photo_by_imdb_id(imdb_person_id):
+    """通过 TMDB find + IMDb 人物ID 获取头像（高置信度兜底）。"""
+    if not TMDB_API_KEY or not imdb_person_id:
+        return None
+    try:
+        url = f"https://api.themoviedb.org/3/find/{imdb_person_id}"
+        response = requests.get(
+            url,
+            params={
+                "api_key": TMDB_API_KEY,
+                "external_source": "imdb_id",
+                "language": "en-US",
+            },
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+        if response.status_code != 200:
+            return None
+        person_results = response.json().get("person_results") or []
+        if not person_results:
+            return None
+        profile_path = person_results[0].get("profile_path")
+        photo_url = _build_tmdb_profile_url(profile_path)
+        if photo_url and _is_valid_image_url(photo_url):
+            return photo_url
+    except Exception:
+        return None
+    return None
+
+
 def get_imdb_person_info(person_id):
     """从IMDB获取演员/导演详细信息"""
     if not person_id:
@@ -1068,6 +1135,7 @@ def get_imdb_person_info(person_id):
     result = {
         'name': None,
         'photo': None,
+        'photo_source': None,
         'bio': None,
         'birthplace': None  # 可以从中推断国籍
     }
@@ -1093,6 +1161,7 @@ def get_imdb_person_info(person_id):
                             result['name'] = data['name']
                         if 'image' in data and not result['photo'] and _is_valid_image_url(data['image']):
                             result['photo'] = data['image']
+                            result['photo_source'] = 'IMDB'
                         if 'birthPlace' in data:
                             # birthPlace可能是字符串或对象
                             birthplace = data['birthPlace']
@@ -1110,7 +1179,9 @@ def get_imdb_person_info(person_id):
                     photo_url = img['src']
                     if '@._' in photo_url:
                         photo_url = photo_url.split('@._')[0] + '@.jpg'
-                    result['photo'] = photo_url
+                    if _is_valid_image_url(photo_url):
+                        result['photo'] = photo_url
+                        result['photo_source'] = 'IMDB'
 
             # 查找姓名（如果JSON-LD没有）
             if not result['name']:
@@ -1124,6 +1195,12 @@ def get_imdb_person_info(person_id):
 
     if result.get('photo') and not _is_valid_image_url(result.get('photo')):
         result['photo'] = None
+        result['photo_source'] = None
+    if not result.get('photo'):
+        tmdb_photo = get_tmdb_person_photo_by_imdb_id(person_id)
+        if tmdb_photo:
+            result['photo'] = tmdb_photo
+            result['photo_source'] = 'TMDB'
 
     return result if (result['name'] or result['photo']) else None
 
