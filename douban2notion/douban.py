@@ -145,6 +145,8 @@ def insert_movie(douban_name,notion_helper):
             "MovieName": movie.get("MovieName"),
             "Season": movie.get("Season"),
             "Cover": movie.get("Cover"),
+            "CoverSource": movie.get("CoverSource"),
+            "CoverStatus": movie.get("CoverStatus"),
             "page_id": i.get("id")
         }
     results = []
@@ -260,6 +262,14 @@ def insert_movie(douban_name,notion_helper):
                     movie["IMDBRating"] = imdb_info['rating']
                 if imdb_info.get('poster'):
                     movie["Cover"] = imdb_info['poster']
+                    movie["CoverSource"] = "IMDB"
+                    movie["CoverStatus"] = "Ok"
+                else:
+                    movie["CoverStatus"] = "Missing"
+                movie["CoverCheckedAt"] = pendulum.now(tz=utils.tz).int_timestamp
+            else:
+                movie["CoverStatus"] = "Missing"
+                movie["CoverCheckedAt"] = pendulum.now(tz=utils.tz).int_timestamp
 
             # ── 判断是否有实质变化需要更新 ───────────────────────────
             current_name = notion_movive.get("Name")
@@ -276,6 +286,8 @@ def insert_movie(douban_name,notion_helper):
                 or notion_movive.get("MovieName") != movie.get("MovieName")
                 or notion_movive.get("Season") != movie.get("Season")
                 or (movie.get("Cover") and notion_movive.get("Cover") != movie.get("Cover"))
+                or (movie.get("CoverSource") and notion_movive.get("CoverSource") != movie.get("CoverSource"))
+                or notion_movive.get("CoverStatus") != movie.get("CoverStatus")
                 or (movie.get("IMDB") and notion_movive.get("IMDB") != movie.get("IMDB"))
                 or (movie.get("IMDB_Url") and notion_movive.get("IMDB_Url") != movie.get("IMDB_Url"))
             )
@@ -298,6 +310,7 @@ def insert_movie(douban_name,notion_helper):
                                 nation = get_person_nation_from_birthplace(person_info_data.get('birthplace'))
                                 person_info = {
                                     'photo': person_info_data.get('photo'),
+                                    'photo_source': 'IMDB',
                                     'nation': nation,
                                     'imdb_id': actor['id'],
                                     'bio': person_info_data.get('bio'),
@@ -327,10 +340,12 @@ def insert_movie(douban_name,notion_helper):
                                 nation = get_person_nation_from_birthplace(person_info_data.get('birthplace'))
                                 person_info = {
                                     'photo': person_info_data.get('photo'),
+                                    'photo_source': 'IMDB',
                                     'nation': nation,
                                     'imdb_id': actor['id'],
                                     'bio': person_info_data.get('bio'),
-                                    'c_name': douban_actors_map.get(idx)
+                                    # 外文条目不按顺序映射中文名，避免 C-Name 错位
+                                    'c_name': None
                                 }
                             actor_ids.append(notion_helper.get_relation_id(
                                 actor['name'], notion_helper.actor_database_id, USER_ICON_URL, {}, person_info
@@ -352,6 +367,7 @@ def insert_movie(douban_name,notion_helper):
                                 nation = get_person_nation_from_birthplace(person_info_data.get('birthplace'))
                                 person_info = {
                                     'photo': person_info_data.get('photo'),
+                                    'photo_source': 'IMDB',
                                     'nation': nation,
                                     'imdb_id': director['id'],
                                     'bio': person_info_data.get('bio'),
@@ -380,10 +396,12 @@ def insert_movie(douban_name,notion_helper):
                                 nation = get_person_nation_from_birthplace(person_info_data.get('birthplace'))
                                 person_info = {
                                     'photo': person_info_data.get('photo'),
+                                    'photo_source': 'IMDB',
                                     'nation': nation,
                                     'imdb_id': director['id'],
                                     'bio': person_info_data.get('bio'),
-                                    'c_name': douban_directors_map.get(idx)
+                                    # 外文条目不按顺序映射中文名，避免 C-Name 错位
+                                    'c_name': None
                                 }
                             director_ids.append(notion_helper.get_relation_id(
                                 director['name'], notion_helper.director_database_id, USER_ICON_URL, {}, person_info
@@ -467,10 +485,14 @@ def insert_movie(douban_name,notion_helper):
             cover = None
             if imdb_info and imdb_info.get('poster'):
                 cover = imdb_info['poster']
+                movie["CoverSource"] = "IMDB"
+                movie["CoverStatus"] = "Ok"
             if imdb_info and imdb_info.get('rating'):
                 movie["IMDBRating"] = imdb_info['rating']
             if not cover:
                 print(f"  IMDB封面获取失败，跳过封面")
+                movie["CoverStatus"] = "Missing"
+            movie["CoverCheckedAt"] = pendulum.now(tz=utils.tz).int_timestamp
 
             movie["Cover"] = cover
             movie["Medium"] = subject.get("type")
@@ -510,6 +532,7 @@ def insert_movie(douban_name,notion_helper):
                                 )
                                 person_info = {
                                     'photo': person_info_data.get('photo'),
+                                    'photo_source': 'IMDB',
                                     'nation': nation,
                                     'imdb_id': actor['id'],
                                     'bio': person_info_data.get('bio'),
@@ -538,6 +561,7 @@ def insert_movie(douban_name,notion_helper):
                                 )
                                 person_info = {
                                     'photo': person_info_data.get('photo'),
+                                    'photo_source': 'IMDB',
                                     'nation': nation,
                                     'imdb_id': director['id'],
                                     'bio': person_info_data.get('bio'),
@@ -601,10 +625,12 @@ def insert_movie(douban_name,notion_helper):
                                 )
                                 person_info = {
                                     'photo': person_info_data.get('photo'),
+                                    'photo_source': 'IMDB',
                                     'nation': nation,
                                     'imdb_id': actor['id'],
                                     'bio': person_info_data.get('bio'),
-                                    'c_name': douban_actors_map.get(idx)  # 豆瓣中文名
+                                    # 外文条目不按顺序映射中文名，避免 C-Name 错位
+                                    'c_name': None
                                 }
 
                             actor_id = notion_helper.get_relation_id(
@@ -632,10 +658,12 @@ def insert_movie(douban_name,notion_helper):
                                 )
                                 person_info = {
                                     'photo': person_info_data.get('photo'),
+                                    'photo_source': 'IMDB',
                                     'nation': nation,
                                     'imdb_id': director['id'],
                                     'bio': person_info_data.get('bio'),
-                                    'c_name': douban_directors_map.get(idx)  # 豆瓣中文名
+                                    # 外文条目不按顺序映射中文名，避免 C-Name 错位
+                                    'c_name': None
                                 }
 
                             director_id = notion_helper.get_relation_id(
@@ -1379,11 +1407,11 @@ def _get_book_cover(subject, title):
     author_name = authors[0] if authors else None
     goodreads_cover = get_goodreads_cover(title, author=author_name, isbn=isbn)
     if _is_valid_image_url(goodreads_cover):
-        return goodreads_cover
+        return goodreads_cover, "Goodreads"
     douban_cover = _get_douban_book_cover(subject)
     if douban_cover:
-        return douban_cover
-    return _get_openlibrary_cover(isbn)
+        return douban_cover, "Douban"
+    return _get_openlibrary_cover(isbn), "OpenLibrary"
 
 
 def _extract_book_year(subject):
@@ -1444,7 +1472,12 @@ def insert_book(douban_name, notion_helper):
             "Date": book.get("Date"),
             "Rating": book.get("Rating"),
             "Cover": book.get("Cover"),
+            "CoverStatus": book.get("CoverStatus"),
+            "CoverSource": book.get("CoverSource"),
+            "CoverCheckedAt": book.get("CoverCheckedAt"),
             "ISBN": book.get("ISBN"),
+            "ISBN_13": book.get("ISBN_13"),
+            "GD_Url": book.get("GD_Url"),
             "Intro": book.get("Intro"),
             "DoubanRating": book.get("DoubanRating"),
             "Raters": book.get("Raters"),
@@ -1470,8 +1503,13 @@ def insert_book(douban_name, notion_helper):
         book["Date"] = create_time.int_timestamp
         book["DB_Url"] = subject.get("url")
         book["Status"] = book_status.get(result.get("status"))
-        book["Cover"] = _get_book_cover(subject, book.get("Name"))
+        book_cover, book_cover_source = _get_book_cover(subject, book.get("Name"))
+        book["Cover"] = book_cover
+        book["CoverSource"] = book_cover_source if book_cover else None
+        book["CoverStatus"] = "Ok" if book_cover else "Missing"
+        book["CoverCheckedAt"] = pendulum.now(tz=utils.tz).int_timestamp
         book["ISBN"] = subject.get("isbn")
+        book["ISBN_13"] = subject.get("isbn13") or subject.get("isbn")
         book["Intro"] = subject.get("intro")
         book["Publisher"] = _extract_publisher_list(subject)
         if subject.get("tags"):
@@ -1483,7 +1521,7 @@ def insert_book(douban_name, notion_helper):
             author_ids = []
             for author_name in subject.get("author")[0:MAX_AUTHORS_RELATION]:
                 author_photo = _get_openlibrary_author_photo(author_name)
-                person_info = {"photo": author_photo} if author_photo else None
+                person_info = {"photo": author_photo, "photo_source": "OpenLibrary"} if author_photo else {"photo_source": "OpenLibrary"}
                 author_ids.append(
                     notion_helper.get_relation_id(
                         author_name, notion_helper.author_database_id, USER_ICON_URL, {}, person_info
@@ -1513,10 +1551,14 @@ def insert_book(douban_name, notion_helper):
                 or existing_book.get("Status") != book.get("Status")
                 or existing_book.get("Rating") != book.get("Rating")
                 or existing_book.get("ISBN") != book.get("ISBN")
+                or existing_book.get("ISBN_13") != book.get("ISBN_13")
+                or existing_book.get("GD_Url") != book.get("GD_Url")
                 or existing_book.get("Intro") != book.get("Intro")
                 or existing_book.get("DoubanRating") != book.get("DoubanRating")
                 or existing_book.get("Raters") != book.get("Raters")
                 or existing_book.get("Year") != book.get("Year")
+                or existing_book.get("CoverStatus") != book.get("CoverStatus")
+                or existing_book.get("CoverSource") != book.get("CoverSource")
                 or existing_book.get("Author") != _normalize_relation_ids(book.get("Author"))
                 or existing_book.get("Category") != _normalize_relation_ids(book.get("Category"))
                 or existing_book.get("Publisher") != _normalize_multi_select_names(book.get("Publisher"))

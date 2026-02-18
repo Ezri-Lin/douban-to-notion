@@ -14,10 +14,15 @@ book_properties_type_dict = {
     "Name":TITLE,
     "Remark":RICH_TEXT,
     "ISBN":RICH_TEXT,
+    "ISBN_13":RICH_TEXT,
     "DB_Url":URL,
+    "GD_Url":URL,
     "Author":RELATION,
     "Rating":SELECT,
     "Cover":FILES,
+    "CoverStatus":SELECT,
+    "CoverCheckedAt":DATE,
+    "CoverSource":SELECT,
     "Category":RELATION,
     "Status":STATUS,
     "Date":DATE,
@@ -43,18 +48,26 @@ actor_properties_type_dict = {
     "Name": TITLE,  # 人物名字
     "C-Name": RICH_TEXT,  # 中文译名
     "Photo": FILES,  # 人物照片
+    "PhotoStatus": SELECT,
+    "PhotoCheckedAt": DATE,
+    "PhotoSource": SELECT,
     "Nation": SELECT,  # 国籍
     "Bio": RICH_TEXT,  # 简介
     "IMDB": RICH_TEXT,  # IMDB编号
+    "IMDB_Url": URL,
 }
 
 director_properties_type_dict = {
     "Name": TITLE,
     "C-Name": RICH_TEXT,
     "Photo": FILES,
+    "PhotoStatus": SELECT,
+    "PhotoCheckedAt": DATE,
+    "PhotoSource": SELECT,
     "Nation": SELECT,
     "Bio": RICH_TEXT,
     "IMDB": RICH_TEXT,
+    "IMDB_Url": URL,
 }
 
 
@@ -65,6 +78,9 @@ movie_properties_type_dict = {
     "Director": RELATION,
     "Actor": RELATION,
     "Cover": FILES,
+    "CoverStatus": SELECT,
+    "CoverCheckedAt": DATE,
+    "CoverSource": SELECT,
     "Category": RELATION,
     "Status": STATUS,
     "Medium": SELECT,

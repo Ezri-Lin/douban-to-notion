@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import time
 import requests
 
 from notion_client import Client
@@ -242,24 +243,40 @@ class NotionHelper:
             db_properties = (self.get_database_schema(id).get("properties") or {})
 
             if person_info:
+                now_ts = int(time.time())
+                photo_url = person_info.get('photo')
+                photo_ok = self._is_valid_image_url(photo_url) if photo_url else False
                 if person_info.get('c_name') and "C-Name" in db_properties:
                     properties["C-Name"] = get_rich_text(person_info['c_name'])
-                if person_info.get('photo') and "Photo" in db_properties:
+                if photo_ok and "Photo" in db_properties:
                     properties["Photo"] = {
-                        "files": [{"type": "external", "name": "Photo", "external": {"url": person_info['photo']}}]
+                        "files": [{"type": "external", "name": "Photo", "external": {"url": photo_url}}]
                     }
+                if "PhotoStatus" in db_properties:
+                    properties["PhotoStatus"] = {"select": {"name": "Ok" if photo_ok else "Missing"}}
+                if "PhotoCheckedAt" in db_properties:
+                    properties["PhotoCheckedAt"] = {
+                        "date": {
+                            "start": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now_ts)),
+                            "time_zone": "Asia/Shanghai",
+                        }
+                    }
+                if person_info.get('photo_source') and "PhotoSource" in db_properties:
+                    properties["PhotoSource"] = {"select": {"name": person_info['photo_source']}}
                 if person_info.get('nation') and "Nation" in db_properties:
                     properties["Nation"] = {"select": {"name": person_info['nation']}}
                 if person_info.get('imdb_id') and "IMDB" in db_properties:
                     properties["IMDB"] = get_rich_text(person_info['imdb_id'])
+                if person_info.get('imdb_id') and "IMDB_Url" in db_properties:
+                    properties["IMDB_Url"] = {"url": f"https://www.imdb.com/name/{person_info['imdb_id']}/"}
                 if person_info.get('bio') and "Bio" in db_properties:
                     properties["Bio"] = get_rich_text(person_info['bio'])
 
             page_icon = get_icon(icon) if icon else None
             page_cover = None
-            if person_info and person_info.get('photo'):
-                page_icon = get_icon(person_info['photo'])
-                page_cover = get_icon(person_info['photo'])
+            if person_info and photo_ok:
+                page_icon = get_icon(photo_url)
+                page_cover = get_icon(photo_url)
 
             create_params = {"parent": parent, "properties": properties}
             if page_icon:
@@ -280,6 +297,7 @@ class NotionHelper:
         page_properties = page.get("properties", {})
         update_properties = {}
         update_page_payload = {"page_id": page_id}
+        now_ts = int(time.time())
 
         c_name = person_info.get("c_name")
         if c_name and "C-Name" in page_properties:
@@ -289,16 +307,34 @@ class NotionHelper:
                 update_properties["C-Name"] = get_rich_text(c_name)
 
         photo = person_info.get("photo")
+        photo_ok = self._is_valid_image_url(photo) if photo else False
         if photo and "Photo" in page_properties:
             current_photo = page_properties["Photo"].get("files", [])
             current_photo_url = None
             if current_photo:
                 current_photo_url = (current_photo[0].get("external") or {}).get("url")
-            if (not current_photo_url) or (not self._is_valid_image_url(current_photo_url)):
+            if photo_ok and ((not current_photo_url) or (not self._is_valid_image_url(current_photo_url))):
                 update_properties["Photo"] = {
                     "files": [{"type": "external", "name": "Photo", "external": {"url": photo}}]
                 }
-        if photo:
+        if "PhotoStatus" in page_properties:
+            current_status = (page_properties["PhotoStatus"].get("select") or {}).get("name")
+            new_status = "Ok" if photo_ok else "Missing"
+            if current_status != new_status:
+                update_properties["PhotoStatus"] = {"select": {"name": new_status}}
+        if "PhotoCheckedAt" in page_properties:
+            update_properties["PhotoCheckedAt"] = {
+                "date": {
+                    "start": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now_ts)),
+                    "time_zone": "Asia/Shanghai",
+                }
+            }
+        if person_info.get("photo_source") and "PhotoSource" in page_properties:
+            current_source = (page_properties["PhotoSource"].get("select") or {}).get("name")
+            if current_source != person_info.get("photo_source"):
+                update_properties["PhotoSource"] = {"select": {"name": person_info["photo_source"]}}
+
+        if photo_ok:
             icon_url = ((page.get("icon") or {}).get("external") or {}).get("url")
             cover_url = ((page.get("cover") or {}).get("external") or {}).get("url")
             if (not icon_url) or (not self._is_valid_image_url(icon_url)):
@@ -318,6 +354,11 @@ class NotionHelper:
             current_imdb = current_imdb[0].get("plain_text") if current_imdb else None
             if not current_imdb:
                 update_properties["IMDB"] = get_rich_text(imdb_id)
+        if imdb_id and "IMDB_Url" in page_properties:
+            current_imdb_url = page_properties["IMDB_Url"].get("url")
+            imdb_url = f"https://www.imdb.com/name/{imdb_id}/"
+            if current_imdb_url != imdb_url:
+                update_properties["IMDB_Url"] = {"url": imdb_url}
 
         bio = person_info.get("bio")
         if bio and "Bio" in page_properties:

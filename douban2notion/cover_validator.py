@@ -2,6 +2,7 @@ import argparse
 import os
 from typing import Optional
 
+import pendulum
 import requests
 from dotenv import load_dotenv
 
@@ -15,6 +16,10 @@ load_dotenv()
 URL_VALIDATION_CACHE = {}
 AUTHOR_NAME_CACHE = {}
 OPENLIB_AUTHOR_PHOTO_CACHE = {}
+
+
+def now_date_payload():
+    return {"date": {"start": pendulum.now("Asia/Shanghai").to_datetime_string(), "time_zone": "Asia/Shanghai"}}
 
 
 def is_valid_image_url(url: Optional[str]) -> bool:
@@ -86,6 +91,23 @@ def update_page_media(client, page_id: str, property_name: Optional[str], image_
             }
         }
     client.pages.update(**payload)
+
+
+def update_check_fields(client, page, status_field: str, checked_field: str, source_field: Optional[str], status: str, source: Optional[str] = None):
+    props = page.get("properties") or {}
+    update_properties = {}
+    if status_field in props:
+        current_status = get_property_value(props.get(status_field) or {})
+        if current_status != status:
+            update_properties[status_field] = {"select": {"name": status}}
+    if checked_field in props:
+        update_properties[checked_field] = now_date_payload()
+    if source_field and source_field in props and source:
+        current_source = get_property_value(props.get(source_field) or {})
+        if current_source != source:
+            update_properties[source_field] = {"select": {"name": source}}
+    if update_properties:
+        client.pages.update(page_id=page.get("id"), properties=update_properties)
 
 
 def get_openlibrary_book_cover(isbn: Optional[str]) -> Optional[str]:
@@ -172,17 +194,23 @@ def validate_movie_covers(nh: NotionHelper):
         cover_url = get_cover_url(page)
         valid = is_valid_image_url(prop_cover) and is_valid_image_url(icon_url) and is_valid_image_url(cover_url)
         if valid:
+            update_check_fields(nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok")
             continue
 
         imdb_id = get_rich_text_value(page, "IMDB")
         if not imdb_id:
+            status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
+            update_check_fields(nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status)
             continue
         imdb_info = get_imdb_info(imdb_id)
         new_cover = (imdb_info or {}).get("poster")
         if not new_cover or not is_valid_image_url(new_cover):
+            status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
+            update_check_fields(nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status)
             continue
         try:
             update_page_media(nh.client, page_id, "Cover", new_cover, write_property=True)
+            update_check_fields(nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok", "IMDB")
             fixed += 1
         except Exception:
             continue
@@ -201,6 +229,7 @@ def validate_book_covers(nh: NotionHelper):
         cover_url = get_cover_url(page)
         valid = is_valid_image_url(prop_cover) and is_valid_image_url(icon_url) and is_valid_image_url(cover_url)
         if valid:
+            update_check_fields(nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok")
             continue
 
         title = get_title_value(page, "Name")
@@ -211,13 +240,18 @@ def validate_book_covers(nh: NotionHelper):
             author_name = get_author_name_by_id(nh, author_rel[0].get("id"))
 
         new_cover = get_goodreads_cover(title, author=author_name, isbn=isbn)
+        source = "Goodreads"
         if not is_valid_image_url(new_cover):
             new_cover = get_openlibrary_book_cover(isbn)
+            source = "OpenLibrary"
         if not new_cover:
+            status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
+            update_check_fields(nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status)
             continue
 
         try:
             update_page_media(nh.client, page_id, "Cover", new_cover, write_property=True)
+            update_check_fields(nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok", source)
             fixed += 1
         except Exception:
             continue
@@ -248,6 +282,7 @@ def validate_people_photos(nh: NotionHelper, db_id: str, label: str, imdb_enable
         valid_icon = is_valid_image_url(icon_url)
         valid_cover = is_valid_image_url(cover_url)
         if valid_photo and valid_icon and valid_cover:
+            update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", "Ok")
             continue
 
         new_photo = None
@@ -260,6 +295,8 @@ def validate_people_photos(nh: NotionHelper, db_id: str, label: str, imdb_enable
             new_photo = get_openlibrary_author_photo(name)
 
         if not new_photo or not is_valid_image_url(new_photo):
+            status = "Missing" if (not prop_photo and not icon_url and not cover_url) else "Broken"
+            update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", status)
             continue
 
         try:
@@ -270,6 +307,8 @@ def validate_people_photos(nh: NotionHelper, db_id: str, label: str, imdb_enable
                 image_url=new_photo,
                 write_property=has_photo_property,
             )
+            source = "IMDB" if imdb_enabled else "OpenLibrary"
+            update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", "Ok", source)
             fixed += 1
         except Exception:
             continue
