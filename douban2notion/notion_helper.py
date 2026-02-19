@@ -296,11 +296,11 @@ class NotionHelper:
         else:
             page_id = response.get("results")[0].get("id")
             if person_info:
-                self._update_person_page_if_needed(page_id, person_info)
+                self._update_person_page_if_needed(page_id, person_info, preferred_name=name)
         self.__cache[key] = page_id
         return page_id
 
-    def _update_person_page_if_needed(self, page_id, person_info):
+    def _update_person_page_if_needed(self, page_id, person_info, preferred_name=None):
         page = self.client.pages.retrieve(page_id=page_id)
         page_properties = page.get("properties", {})
         update_properties = {}
@@ -365,9 +365,37 @@ class NotionHelper:
             if not current_bio:
                 update_properties["Bio"] = get_rich_text(bio)
 
+        # If this person is synced from IMDB and current Name is Chinese transliteration,
+        # promote to the IMDB canonical English name to avoid mixed-language actor/director rows.
+        if preferred_name and "Name" in page_properties and imdb_id:
+            current_title = page_properties["Name"].get("title", [])
+            current_name = current_title[0].get("plain_text") if current_title else ""
+            if self._should_promote_person_name(current_name, preferred_name):
+                update_properties["Name"] = get_title(preferred_name)
+
         if update_properties:
             update_page_payload["properties"] = update_properties
             self.client.pages.update(**update_page_payload)
+
+    @staticmethod
+    def _has_chinese(text):
+        return bool(text) and re.search(r"[\u4e00-\u9fff]", str(text)) is not None
+
+    @staticmethod
+    def _has_latin(text):
+        return bool(text) and re.search(r"[A-Za-z]", str(text)) is not None
+
+    @classmethod
+    def _should_promote_person_name(cls, current_name, preferred_name):
+        if not preferred_name or current_name == preferred_name:
+            return False
+        # only promote when preferred name is clearly latin-style
+        if not cls._has_latin(preferred_name) or cls._has_chinese(preferred_name):
+            return False
+        # current name is Chinese-only or transliterated with middle dot
+        if cls._has_chinese(current_name):
+            return True
+        return False
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def update_page(self, page_id, properties, icon=None):
