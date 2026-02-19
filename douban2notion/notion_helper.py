@@ -243,7 +243,8 @@ class NotionHelper:
         if imdb_id and "IMDB" in db_properties:
             imdb_filter = {"property": "IMDB", "rich_text": {"equals": imdb_id}}
             response = self.client.databases.query(database_id=id, filter=imdb_filter)
-        if len(response.get("results")) == 0:
+            # With IMDB id, do not fall back to Name matching; that can bind wrong people.
+        elif len(response.get("results")) == 0:
             name_filter = {"property": "Name", "title": {"equals": name}}
             response = self.client.databases.query(database_id=id, filter=name_filter)
         if len(response.get("results")) == 0:
@@ -350,6 +351,9 @@ class NotionHelper:
         if imdb_id and "IMDB" in page_properties:
             current_imdb = page_properties["IMDB"].get("rich_text", [])
             current_imdb = current_imdb[0].get("plain_text") if current_imdb else None
+            if current_imdb and current_imdb != imdb_id:
+                # Hard guard: never overwrite an existing person with a different IMDB id.
+                return
             if not current_imdb:
                 update_properties["IMDB"] = get_rich_text(imdb_id)
         if imdb_id and "IMDB_Url" in page_properties:
