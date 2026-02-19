@@ -55,6 +55,11 @@ headers = {
 # 外链封面可用性缓存，避免重复网络探测
 COVER_URL_VALIDITY_CACHE = {}
 AUTHOR_PHOTO_CACHE = {}
+IMDB_INFO_CACHE = {}
+IMDB_CAST_CREW_CACHE = {}
+IMDB_PERSON_CACHE = {}
+IMDB_SEARCH_CACHE = {}
+TMDB_SEARCH_CACHE = {}
 
 # 豆瓣中文标题 -> IMDB英文检索词（通过环境变量配置，避免硬编码样本数据）
 DEFAULT_IMDB_TITLE_ALIAS_MAP = {}
@@ -232,6 +237,23 @@ def insert_movie(douban_name,notion_helper):
             douban_title = movie.get("_douban_title")
             is_chinese = movie.get("_is_chinese")
             original_title = movie.get("_original_title")
+            basic_changed = (
+                notion_movive.get("Date") != movie.get("Date")
+                or notion_movive.get("Remark") != movie.get("Remark")
+                or notion_movive.get("Status") != movie.get("Status")
+                or notion_movive.get("Rating") != movie.get("Rating")
+                or notion_movive.get("Season") != movie.get("Season")
+            )
+            needs_metadata_backfill = (
+                not notion_movive.get("Actor")
+                or not notion_movive.get("Director")
+                or not notion_movive.get("Cover")
+                or (not is_chinese and not notion_movive.get("IMDB"))
+                or (not is_chinese and _has_chinese(notion_movive.get("Name")))
+            )
+            # Fast path: most rows are unchanged; skip expensive IMDB/TMDB requests.
+            if not basic_changed and not needs_metadata_backfill:
+                continue
 
             # ── 获取 IMDB 信息 ──────────────────────────────────────
             subtype = subject.get("subtype", "movie")
@@ -754,25 +776,8 @@ def insert_movie(douban_name,notion_helper):
                         movie["Director"] = director_relations
                 else:
                     if not imdb_id:
-                        print(f"  外文条目未获取到IMDB，暂回退豆瓣演职员（中文）")
-                    # 没有IMDB信息，回退到豆瓣
-                    print(f"  IMDB不可用，回退到豆瓣数据源")
-                    if subject.get("actors"):
-                        actors = subject.get("actors")[0:MAX_ACTORS_RELATION]
-                        movie["Actor"] = [
-                            notion_helper.get_relation_id(
-                                x.get("name"), notion_helper.actor_database_id, USER_ICON_URL
-                            )
-                            for x in actors
-                        ]
-
-                    if subject.get("directors"):
-                        movie["Director"] = [
-                            notion_helper.get_relation_id(
-                                x.get("name"), notion_helper.director_database_id, USER_ICON_URL
-                            )
-                            for x in subject.get("directors")[0:MAX_DIRECTORS_RELATION]
-                        ]
+                        print(f"  外文条目未获取到IMDB，跳过演员/导演写入，避免中文音译污染")
+                    # 外文条目在无IMDB时不再回退豆瓣，避免写入“xxx·xxx”中文音译人名
             properties = utils.get_properties(movie, movie_properties_type_dict)
             notion_helper.get_date_relation(properties,create_time)
 
@@ -1127,6 +1132,9 @@ def search_imdb_by_title(title, year=None, media_type="movie"):
     """通过电影/剧集名称在IMDB搜索
     media_type: "movie" 搜索电影(ttype=ft)，"tv" 搜索剧集(ttype=tv)
     """
+    cache_key = (title or "", str(year or ""), media_type or "movie")
+    if cache_key in IMDB_SEARCH_CACHE:
+        return IMDB_SEARCH_CACHE[cache_key]
     try:
         suggest_id = _search_imdb_suggest(title, year=year, media_type=media_type)
         if suggest_id:
@@ -1134,6 +1142,7 @@ def search_imdb_by_title(title, year=None, media_type="movie"):
             suggest_title = (suggest_info or {}).get("title")
             if _is_imdb_title_consistent(title, suggest_title):
                 print(f"  通过IMDB suggest找到: {suggest_id} ({title})")
+                IMDB_SEARCH_CACHE[cache_key] = suggest_id
                 return suggest_id
             print(f"  IMDB suggest候选不一致，忽略: {suggest_id} ({suggest_title})")
 
@@ -1166,9 +1175,11 @@ def search_imdb_by_title(title, year=None, media_type="movie"):
                 imdb_title = (imdb_info or {}).get("title")
                 if _is_imdb_title_consistent(title, imdb_title):
                     print(f"  通过IMDB搜索找到: {imdb_id}")
+                    IMDB_SEARCH_CACHE[cache_key] = imdb_id
                     return imdb_id
     except Exception as e:
         print(f"  IMDB搜索失败: {str(e)[:50]}")
+    IMDB_SEARCH_CACHE[cache_key] = None
     return None
 
 
@@ -1176,6 +1187,9 @@ def search_tmdb_for_imdb(title, year=None, media_type="movie"):
     """TMDB fallback: use Chinese title to find IMDb id + original title."""
     if not TMDB_API_KEY or not title:
         return None, None
+    cache_key = (title or "", str(year or ""), media_type or "movie")
+    if cache_key in TMDB_SEARCH_CACHE:
+        return TMDB_SEARCH_CACHE[cache_key]
     try:
         is_tv = media_type == "tv"
         search_type = "tv" if is_tv else "movie"
@@ -1226,8 +1240,10 @@ def search_tmdb_for_imdb(title, year=None, media_type="movie"):
         if not re.match(r"^tt\d{7,8}$", imdb_id):
             imdb_id = None
         original_title = detail.get("original_name") if is_tv else detail.get("original_title")
+        TMDB_SEARCH_CACHE[cache_key] = (imdb_id, original_title)
         return imdb_id, original_title
     except Exception:
+        TMDB_SEARCH_CACHE[cache_key] = (None, None)
         return None, None
 
 
@@ -1271,6 +1287,8 @@ def get_imdb_person_info(person_id):
     """从IMDB获取演员/导演详细信息"""
     if not person_id:
         return None
+    if person_id in IMDB_PERSON_CACHE:
+        return IMDB_PERSON_CACHE[person_id]
 
     result = {
         'name': None,
@@ -1342,7 +1360,9 @@ def get_imdb_person_info(person_id):
             result['photo'] = tmdb_photo
             result['photo_source'] = 'TMDB'
 
-    return result if (result['name'] or result['photo']) else None
+    final_result = result if (result['name'] or result['photo']) else None
+    IMDB_PERSON_CACHE[person_id] = final_result
+    return final_result
 
 def get_person_nation_from_birthplace(birthplace):
     """从出生地推断国籍"""
@@ -1374,6 +1394,10 @@ def get_person_nation_from_birthplace(birthplace):
 
 def get_imdb_cast_and_crew(imdb_id):
     """从IMDB获取演员和导演列表，优先使用JSON-LD，回退到fullcredits页面"""
+    if not imdb_id:
+        return {'actors': [], 'directors': []}
+    if imdb_id in IMDB_CAST_CREW_CACHE:
+        return IMDB_CAST_CREW_CACHE[imdb_id]
     result = {
         'actors': [],
         'directors': []
@@ -1492,12 +1516,15 @@ def get_imdb_cast_and_crew(imdb_id):
     except Exception as e:
         print(f"  获取演职人员失败: {str(e)[:50]}")
 
+    IMDB_CAST_CREW_CACHE[imdb_id] = result
     return result
 
 def get_imdb_info(imdb_id):
     """从IMDB获取电影信息（海报、原名、评分）"""
     if not imdb_id:
         return None
+    if imdb_id in IMDB_INFO_CACHE:
+        return IMDB_INFO_CACHE[imdb_id]
 
     result = {
         'poster': None,
@@ -1562,7 +1589,9 @@ def get_imdb_info(imdb_id):
     except Exception as e:
         print(f"  从IMDB获取信息失败 ({imdb_id}): {str(e)[:50]}")
 
-    return result if (result['poster'] or result['title'] or result['rating']) else None
+    final_result = result if (result['poster'] or result['title'] or result['rating']) else None
+    IMDB_INFO_CACHE[imdb_id] = final_result
+    return final_result
 
 def get_goodreads_cover(title, author=None, isbn=None):
     """从Goodreads获取书籍封面（如果Goodreads不可用会返回None）"""
