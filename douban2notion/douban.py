@@ -162,6 +162,7 @@ def insert_movie(douban_name,notion_helper):
             "Status": movie.get("Status"),
             "Date": movie.get("Date"),
             "Rating": movie.get("Rating"),
+            "Wrong": movie.get("Wrong"),
             "Actor": movie.get("Actor"),
             "Director": movie.get("Director"),
             "IMDB": movie.get("IMDB"),
@@ -237,6 +238,7 @@ def insert_movie(douban_name,notion_helper):
             douban_title = movie.get("_douban_title")
             is_chinese = movie.get("_is_chinese")
             original_title = movie.get("_original_title")
+            force_fix_wrong = bool(notion_movive.get("Wrong"))
             basic_changed = (
                 notion_movive.get("Date") != movie.get("Date")
                 or notion_movive.get("Remark") != movie.get("Remark")
@@ -245,6 +247,8 @@ def insert_movie(douban_name,notion_helper):
                 or notion_movive.get("Season") != movie.get("Season")
             )
             needs_metadata_backfill = (
+                force_fix_wrong
+                or
                 not notion_movive.get("Actor")
                 or not notion_movive.get("Director")
                 or not notion_movive.get("Cover")
@@ -346,6 +350,8 @@ def insert_movie(douban_name,notion_helper):
             # ── 判断是否有实质变化需要更新 ───────────────────────────
             current_name = notion_movive.get("Name")
             needs_update = (
+                force_fix_wrong
+                or
                 notion_movive.get("Date") != movie.get("Date")
                 or notion_movive.get("Remark") != movie.get("Remark")
                 or notion_movive.get("Status") != movie.get("Status")
