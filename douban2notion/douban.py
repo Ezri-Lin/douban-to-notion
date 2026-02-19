@@ -257,16 +257,19 @@ def insert_movie(douban_name,notion_helper):
 
             # ── 获取 IMDB 信息 ──────────────────────────────────────
             subtype = subject.get("subtype", "movie")
+            lookup_year = _lookup_year_for_imdb(douban_title, subtype, movie.get("Year"))
+            imdb_invalidated = False
             imdb_id = notion_movive.get("IMDB") or get_imdb(movie.get("DB_Url"))
             if imdb_id:
                 existing_imdb_info = get_imdb_info(imdb_id)
                 if existing_imdb_info and not _is_imdb_title_consistent(douban_title, existing_imdb_info.get("title")):
                     print(f"  现有IMDB({imdb_id})与标题不一致，重新检索: {douban_title}")
                     imdb_id = None
+                    imdb_invalidated = True
             if not imdb_id:
                 found_by_search = False
                 for search_title in _build_imdb_search_titles(douban_title):
-                    imdb_id = search_imdb_by_title(search_title, movie.get("Year"), media_type=subtype)
+                    imdb_id = search_imdb_by_title(search_title, lookup_year, media_type=subtype)
                     if not imdb_id:
                         imdb_id = search_imdb_by_title(search_title, media_type=subtype)
                     if imdb_id:
@@ -274,7 +277,7 @@ def insert_movie(douban_name,notion_helper):
                         break
                 if not found_by_search and _should_try_tmdb_fallback(is_chinese, countries, original_title):
                     tmdb_imdb_id, tmdb_original_title = search_tmdb_for_imdb(
-                        _strip_season(douban_title), movie.get("Year"), media_type=subtype
+                        _strip_season(douban_title), lookup_year, media_type=subtype
                     )
                     if tmdb_imdb_id:
                         imdb_id = tmdb_imdb_id
@@ -291,6 +294,9 @@ def insert_movie(douban_name,notion_helper):
                 movie["IMDB_Url"] = f"https://www.imdb.com/title/{imdb_id}/"
                 if _should_force_foreign_by_imdb(douban_title, (imdb_info or {}).get("title"), countries):
                     is_chinese = False
+            elif imdb_invalidated:
+                movie["IMDB"] = None
+                movie["IMDB_Url"] = None
 
             # ── 计算正确的 Name / MovieName / Cover ─────────────────
             clean_douban_title = _strip_season(douban_title)
@@ -354,6 +360,7 @@ def insert_movie(douban_name,notion_helper):
                 or notion_movive.get("CoverStatus") != movie.get("CoverStatus")
                 or (movie.get("IMDB") and notion_movive.get("IMDB") != movie.get("IMDB"))
                 or (movie.get("IMDB_Url") and notion_movive.get("IMDB_Url") != movie.get("IMDB_Url"))
+                or ("IMDB" in movie and movie.get("IMDB") is None and notion_movive.get("IMDB"))
             )
 
             if needs_update:
@@ -478,6 +485,9 @@ def insert_movie(douban_name,notion_helper):
                 movie.pop("_is_chinese", None)
 
                 properties = utils.get_properties(movie, movie_properties_type_dict)
+                if "IMDB" in movie and movie.get("IMDB") is None:
+                    properties["IMDB"] = {"rich_text": []}
+                    properties["IMDB_Url"] = {"url": None}
                 movie_display = f"{movie.get('Name', 'N/A')}"
                 if movie.get("MovieName"):
                     movie_display += f" / {movie.get('MovieName')}"
@@ -501,8 +511,8 @@ def insert_movie(douban_name,notion_helper):
                     "Rating": movie.get("Rating"),
                     "Actor": movie.get("Actor", notion_movive.get("Actor")),
                     "Director": movie.get("Director", notion_movive.get("Director")),
-                    "IMDB": movie.get("IMDB", notion_movive.get("IMDB")),
-                    "IMDB_Url": movie.get("IMDB_Url", notion_movive.get("IMDB_Url")),
+                    "IMDB": movie["IMDB"] if "IMDB" in movie else notion_movive.get("IMDB"),
+                    "IMDB_Url": movie["IMDB_Url"] if "IMDB_Url" in movie else notion_movive.get("IMDB_Url"),
                     "Name": movie.get("Name", notion_movive.get("Name")),
                     "MovieName": movie.get("MovieName", notion_movive.get("MovieName")),
                     "Year": movie.get("Year", notion_movive.get("Year")),
@@ -527,12 +537,13 @@ def insert_movie(douban_name,notion_helper):
 
             # ── 获取 IMDB 信息 ──────────────────────────────────────
             subtype = subject.get("subtype", "movie")
+            lookup_year = _lookup_year_for_imdb(douban_title, subtype, movie.get("Year"))
             imdb_id = get_imdb(movie.get("DB_Url"))
             if not imdb_id:
                 print(f"  豆瓣页面无IMDB信息，尝试搜索IMDB...")
                 found_by_search = False
                 for search_title in _build_imdb_search_titles(douban_title):
-                    imdb_id = search_imdb_by_title(search_title, movie.get("Year"), media_type=subtype)
+                    imdb_id = search_imdb_by_title(search_title, lookup_year, media_type=subtype)
                     if not imdb_id:
                         imdb_id = search_imdb_by_title(search_title, media_type=subtype)
                     if imdb_id:
@@ -540,7 +551,7 @@ def insert_movie(douban_name,notion_helper):
                         break
                 if not found_by_search and _should_try_tmdb_fallback(is_chinese, countries, original_title):
                     tmdb_imdb_id, tmdb_original_title = search_tmdb_for_imdb(
-                        _strip_season(douban_title), movie.get("Year"), media_type=subtype
+                        _strip_season(douban_title), lookup_year, media_type=subtype
                     )
                     if tmdb_imdb_id:
                         imdb_id = tmdb_imdb_id
@@ -928,6 +939,13 @@ def _build_imdb_search_titles(douban_title):
         seen.add(t)
         result.append(t)
     return result
+
+
+def _lookup_year_for_imdb(douban_title, media_type, year):
+    """TV 分季条目应匹配剧集主ID，避免用分季年份误导检索。"""
+    if media_type == "tv" and _extract_season_number(douban_title):
+        return None
+    return year
 
 
 def _get_alias_title(title):
