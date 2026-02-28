@@ -55,6 +55,10 @@ MANAGED_ISSUES = {
 }
 
 
+def _log(message: str) -> None:
+    print(message, flush=True)
+
+
 def _has_chinese(text: Optional[str]) -> bool:
     return bool(text) and re.search(r"[\u4e00-\u9fff]", str(text)) is not None
 
@@ -322,6 +326,7 @@ def audit_movie(
     pages = nh.query_all(database_id=nh.movie_database_id)
     if limit > 0:
         pages = pages[:limit]
+    _log(f"[Movie] start total={len(pages)} check_remote={check_remote} mismatch_check={enable_imdb_title_mismatch}")
 
     actor_name_map = _build_people_name_map(nh, nh.actor_database_id)
     director_name_map = _build_people_name_map(nh, nh.director_database_id)
@@ -418,8 +423,10 @@ def audit_movie(
 
         if _update_page_properties(nh.client, page, updates):
             changed += 1
+        if checked % 50 == 0:
+            _log(f"[Movie] progress {checked}/{len(pages)} changed={changed}")
 
-    print(f"[Movie] checked={checked} changed={changed}")
+    _log(f"[Movie] checked={checked} changed={changed}")
     return checked, changed
 
 
@@ -431,12 +438,13 @@ def _audit_people_common(
     limit: int = 0,
 ) -> Tuple[int, int]:
     if not db_id:
-        print(f"[{label}] skipped (db not found)")
+        _log(f"[{label}] skipped (db not found)")
         return 0, 0
 
     pages = nh.query_all(database_id=db_id)
     if limit > 0:
         pages = pages[:limit]
+    _log(f"[{label}] start total={len(pages)} check_remote={check_remote}")
 
     changed = 0
     checked = 0
@@ -477,8 +485,10 @@ def _audit_people_common(
 
         if _update_page_properties(nh.client, page, updates):
             changed += 1
+        if checked % 50 == 0:
+            _log(f"[{label}] progress {checked}/{len(pages)} changed={changed}")
 
-    print(f"[{label}] checked={checked} changed={changed}")
+    _log(f"[{label}] checked={checked} changed={changed}")
     return checked, changed
 
 
@@ -498,6 +508,7 @@ def audit_book(nh: NotionHelper, check_remote: bool, limit: int = 0) -> Tuple[in
     pages = nh.query_all(database_id=nh.book_database_id)
     if limit > 0:
         pages = pages[:limit]
+    _log(f"[Book] start total={len(pages)} check_remote={check_remote}")
 
     db_url_map: Dict[str, List[str]] = defaultdict(list)
     for page in pages:
@@ -550,8 +561,10 @@ def audit_book(nh: NotionHelper, check_remote: bool, limit: int = 0) -> Tuple[in
 
         if _update_page_properties(nh.client, page, updates):
             changed += 1
+        if checked % 50 == 0:
+            _log(f"[Book] progress {checked}/{len(pages)} changed={changed}")
 
-    print(f"[Book] checked={checked} changed={changed}")
+    _log(f"[Book] checked={checked} changed={changed}")
     return checked, changed
 
 
@@ -559,7 +572,7 @@ def build_helper(kind: str) -> Optional[NotionHelper]:
     try:
         return NotionHelper(kind)
     except Exception as exc:
-        print(f"[{kind}] init failed: {str(exc)[:160]}")
+        _log(f"[{kind}] init failed: {str(exc)[:160]}")
         return None
 
 
@@ -569,6 +582,7 @@ def run(
     limit: int = 0,
     enable_imdb_title_mismatch: bool = False,
 ) -> None:
+    _log(f"[Audit] scope={scope} check_remote={check_remote} limit={limit} mismatch_check={enable_imdb_title_mismatch}")
     movie_helper = None
     book_helper = None
 
