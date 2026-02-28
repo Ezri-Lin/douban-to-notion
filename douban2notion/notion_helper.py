@@ -393,12 +393,10 @@ class NotionHelper:
     def _should_promote_person_name(cls, current_name, preferred_name):
         if not preferred_name or current_name == preferred_name:
             return False
-        # only promote when preferred name is clearly latin-style
-        if not cls._has_latin(preferred_name) or cls._has_chinese(preferred_name):
-            return False
-        # current name is Chinese-only or transliterated with middle dot
-        if cls._has_chinese(current_name):
-            return True
+        # Prefer Chinese display names when a Chinese preferred_name is provided.
+        # This keeps Chinese-movie Actor/Director relations readable.
+        if cls._has_chinese(preferred_name):
+            return not cls._has_chinese(current_name)
         return False
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
@@ -407,6 +405,10 @@ class NotionHelper:
         if icon:
             update_data["icon"] = icon
         return self.client.pages.update(**update_data)
+
+    @retry(stop_max_attempt_number=3, wait_fixed=5000)
+    def archive_page(self, page_id):
+        return self.client.pages.update(page_id=page_id, archived=True)
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def create_page(self, parent, properties, icon):
