@@ -30,7 +30,8 @@ book_properties_type_dict = {
     "Publisher":MULTI_SELECT,
     "Year":SELECT,
     "DoubanRating":NUMBER,
-    "Raters":NUMBER
+    "Raters":NUMBER,
+    "DataIssue": MULTI_SELECT,
 }
 
 TAG_ICON_URL = "https://www.notion.so/icons/tag_gray.svg"
@@ -55,6 +56,7 @@ actor_properties_type_dict = {
     "Bio": RICH_TEXT,  # 简介
     "IMDB": RICH_TEXT,  # IMDB编号
     "IMDB_Url": URL,
+    "DataIssue": MULTI_SELECT,
 }
 
 director_properties_type_dict = {
@@ -68,6 +70,7 @@ director_properties_type_dict = {
     "Bio": RICH_TEXT,
     "IMDB": RICH_TEXT,
     "IMDB_Url": URL,
+    "DataIssue": MULTI_SELECT,
 }
 
 
@@ -94,4 +97,5 @@ movie_properties_type_dict = {
     "IMDB": RICH_TEXT,
     "IMDB_Url": URL,
     "DB_Url": URL,
+    "DataIssue": MULTI_SELECT,
 }
