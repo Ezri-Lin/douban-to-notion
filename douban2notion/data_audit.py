@@ -7,7 +7,7 @@ import pendulum
 import requests
 from dotenv import load_dotenv
 
-from douban2notion.douban import get_imdb_info, _is_imdb_title_consistent
+from douban2notion.douban import get_imdb_info, search_imdb_by_title, _is_imdb_title_consistent
 from douban2notion.notion_helper import NotionHelper
 from douban2notion.utils import get_property_value
 
@@ -160,6 +160,51 @@ def _is_imdb_binding_consistent(name: Optional[str], movie_name: Optional[str], 
     return False
 
 
+def _to_int_year(value: Optional[str]) -> Optional[int]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text.isdigit():
+        return None
+    year = int(text)
+    if year < 1888 or year > 2100:
+        return None
+    return year
+
+
+def _normalize_media_type(value: Optional[str]) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"tv", "movie"}:
+        return text
+    return "movie"
+
+
+def _is_binding_still_plausible_via_search(
+    current_imdb: str,
+    name: Optional[str],
+    movie_name: Optional[str],
+    year_value: Optional[str],
+    media_value: Optional[str],
+) -> bool:
+    media_type = _normalize_media_type(media_value)
+    year = _to_int_year(year_value)
+    candidates = []
+    for title in [name, movie_name]:
+        title_text = str(title or "").strip()
+        if not title_text:
+            continue
+        if title_text not in candidates:
+            candidates.append(title_text)
+
+    for title in candidates:
+        result = search_imdb_by_title(title, year=year, media_type=media_type)
+        if not result:
+            result = search_imdb_by_title(title, media_type=media_type)
+        if result and result == current_imdb:
+            return True
+    return False
+
+
 def _normalize_person_imdb_id(imdb_id: Optional[str]) -> Optional[str]:
     candidate = str(imdb_id or "").strip()
     if not re.match(r"^nm\d{7,8}$", candidate):
@@ -268,7 +313,12 @@ def _append_data_issue_update(page: Dict, issues: Sequence[str], updates: Dict) 
         updates["DataIssue"] = {"multi_select": [{"name": x} for x in final]}
 
 
-def audit_movie(nh: NotionHelper, check_remote: bool, limit: int = 0) -> Tuple[int, int]:
+def audit_movie(
+    nh: NotionHelper,
+    check_remote: bool,
+    limit: int = 0,
+    enable_imdb_title_mismatch: bool = False,
+) -> Tuple[int, int]:
     pages = nh.query_all(database_id=nh.movie_database_id)
     if limit > 0:
         pages = pages[:limit]
@@ -303,6 +353,8 @@ def audit_movie(nh: NotionHelper, check_remote: bool, limit: int = 0) -> Tuple[i
         imdb_norm = _normalize_movie_imdb_id(imdb_raw)
         actor_ids = _get_relation_ids(page, "Actor")
         director_ids = _get_relation_ids(page, "Director")
+        year_value = get_property_value(props.get("Year") or {})
+        medium_value = get_property_value(props.get("Medium") or {})
         db_url = get_property_value(props.get("DB_Url") or props.get("Url") or {})
         db_url = str(db_url).strip() if db_url else None
 
@@ -345,10 +397,13 @@ def audit_movie(nh: NotionHelper, check_remote: bool, limit: int = 0) -> Tuple[i
             issues.add(ISSUE_DUPLICATE_DB_URL)
         if imdb_norm and len(imdb_map.get(imdb_norm) or []) > 1:
             issues.add(ISSUE_DUPLICATE_IMDB)
-        if imdb_norm:
+        if imdb_norm and enable_imdb_title_mismatch:
             imdb_info = get_imdb_info(imdb_norm) or {}
             imdb_title = imdb_info.get("title")
-            if not _is_imdb_binding_consistent(name, movie_name, imdb_title):
+            is_consistent = _is_imdb_binding_consistent(name, movie_name, imdb_title)
+            if not is_consistent and not _is_binding_still_plausible_via_search(
+                imdb_norm, name, movie_name, year_value, medium_value
+            ):
                 issues.add(ISSUE_IMDB_TITLE_MISMATCH)
 
         updates: Dict = {}
@@ -508,7 +563,12 @@ def build_helper(kind: str) -> Optional[NotionHelper]:
         return None
 
 
-def run(scope: str, check_remote: bool, limit: int = 0) -> None:
+def run(
+    scope: str,
+    check_remote: bool,
+    limit: int = 0,
+    enable_imdb_title_mismatch: bool = False,
+) -> None:
     movie_helper = None
     book_helper = None
 
@@ -518,7 +578,12 @@ def run(scope: str, check_remote: bool, limit: int = 0) -> None:
         book_helper = build_helper("book")
 
     if scope in {"all", "movie"} and movie_helper and movie_helper.movie_database_id:
-        audit_movie(movie_helper, check_remote=check_remote, limit=limit)
+        audit_movie(
+            movie_helper,
+            check_remote=check_remote,
+            limit=limit,
+            enable_imdb_title_mismatch=enable_imdb_title_mismatch,
+        )
     if scope in {"all", "actor"} and movie_helper:
         audit_actor(movie_helper, check_remote=check_remote, limit=limit)
     if scope in {"all", "director"} and movie_helper:
@@ -542,10 +607,20 @@ def main() -> None:
         action="store_true",
         help="只检查字段是否为空，不远程验证图片URL有效性",
     )
+    parser.add_argument(
+        "--enable-imdb-title-mismatch",
+        action="store_true",
+        help="启用 IMDb 标题一致性检测（可能产生误报，默认关闭）",
+    )
     parser.add_argument("--limit", type=int, default=0, help="仅审计前N条，0表示不限制")
     args = parser.parse_args()
 
-    run(scope=args.scope, check_remote=not args.skip_url_check, limit=args.limit)
+    run(
+        scope=args.scope,
+        check_remote=not args.skip_url_check,
+        limit=args.limit,
+        enable_imdb_title_mismatch=args.enable_imdb_title_mismatch,
+    )
 
 
 if __name__ == "__main__":
