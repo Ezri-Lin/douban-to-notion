@@ -67,10 +67,29 @@ TMDB_SEARCH_CACHE = {}
 RELATION_NAME_CACHE = {}
 DOUBAN_SUBJECT_DETAIL_CACHE = {}
 IMDB_MEDIA_TYPE_CACHE = {}
+TMDB_CAST_CREW_BY_IMDB_CACHE = {}
+TMDB_PERSON_PHOTO_BY_NAME_CACHE = {}
+_SOUP_PARSER = None
+_SOUP_FALLBACK_NOTIFIED = False
 
 # 豆瓣中文标题 -> IMDB英文检索词（通过环境变量配置，避免硬编码样本数据）
 DEFAULT_IMDB_TITLE_ALIAS_MAP = {}
 DEFAULT_TMDB_ID_OVERRIDE_MAP = {}
+
+
+def _create_soup(content):
+    global _SOUP_PARSER, _SOUP_FALLBACK_NOTIFIED
+    if _SOUP_PARSER:
+        return BeautifulSoup(content, features=_SOUP_PARSER)
+    try:
+        BeautifulSoup("", features="lxml")
+        _SOUP_PARSER = "lxml"
+    except Exception:
+        _SOUP_PARSER = "html.parser"
+        if not _SOUP_FALLBACK_NOTIFIED:
+            print("  lxml解析器不可用，自动回退到html.parser")
+            _SOUP_FALLBACK_NOTIFIED = True
+    return BeautifulSoup(content, features=_SOUP_PARSER)
 
 def _load_imdb_alias_map():
     alias_map = dict(DEFAULT_IMDB_TITLE_ALIAS_MAP)
@@ -569,6 +588,7 @@ def insert_movie(
                 cast_crew = None
                 if imdb_id:
                     cast_crew = get_imdb_cast_and_crew(imdb_id)
+                    cast_crew = _enrich_cast_crew_with_tmdb_fallback(imdb_id, subtype, cast_crew)
 
                 # ── Actor ────────────────────────────────────────────
                 if is_chinese:
@@ -581,12 +601,24 @@ def insert_movie(
                             if not actor_name:
                                 continue
                             imdb_person_id = None
+                            actor_entry = None
                             if idx < len(cast_crew['actors']):
-                                imdb_person_id = (cast_crew['actors'][idx] or {}).get("id")
+                                actor_entry = cast_crew['actors'][idx] or {}
+                                imdb_person_id = actor_entry.get("id")
                             person_info = (
-                                _build_person_info_payload(imdb_person_id, c_name=actor_name)
+                                _build_person_info_payload(
+                                    imdb_person_id,
+                                    c_name=actor_name,
+                                    photo=(actor_entry or {}).get("photo"),
+                                    photo_source=(actor_entry or {}).get("photo_source"),
+                                )
                                 if imdb_person_id
-                                else None
+                                else _build_person_info_payload(
+                                    None,
+                                    c_name=actor_name,
+                                    photo=(actor_entry or {}).get("photo"),
+                                    photo_source=(actor_entry or {}).get("photo_source"),
+                                )
                             )
                             actor_ids.append(notion_helper.get_relation_id(
                                 actor_name, notion_helper.actor_database_id, USER_ICON_URL, {}, person_info
@@ -605,7 +637,12 @@ def insert_movie(
                     if cast_crew and cast_crew['actors']:
                         actor_ids = []
                         for idx, actor in enumerate(cast_crew['actors']):
-                            person_info = _build_person_info_payload(actor.get("id"), c_name=None)
+                            person_info = _build_person_info_payload(
+                                actor.get("id"),
+                                c_name=None,
+                                photo=(actor or {}).get("photo"),
+                                photo_source=(actor or {}).get("photo_source"),
+                            )
                             actor_ids.append(notion_helper.get_relation_id(
                                 actor['name'], notion_helper.actor_database_id, USER_ICON_URL, {}, person_info
                             ))
@@ -641,12 +678,24 @@ def insert_movie(
                             if not director_name:
                                 continue
                             imdb_person_id = None
+                            director_entry = None
                             if idx < len(cast_crew['directors']):
-                                imdb_person_id = (cast_crew['directors'][idx] or {}).get("id")
+                                director_entry = cast_crew['directors'][idx] or {}
+                                imdb_person_id = director_entry.get("id")
                             person_info = (
-                                _build_person_info_payload(imdb_person_id, c_name=director_name)
+                                _build_person_info_payload(
+                                    imdb_person_id,
+                                    c_name=director_name,
+                                    photo=(director_entry or {}).get("photo"),
+                                    photo_source=(director_entry or {}).get("photo_source"),
+                                )
                                 if imdb_person_id
-                                else None
+                                else _build_person_info_payload(
+                                    None,
+                                    c_name=director_name,
+                                    photo=(director_entry or {}).get("photo"),
+                                    photo_source=(director_entry or {}).get("photo_source"),
+                                )
                             )
                             director_ids.append(notion_helper.get_relation_id(
                                 director_name, notion_helper.director_database_id, USER_ICON_URL, {}, person_info
@@ -664,7 +713,12 @@ def insert_movie(
                     if cast_crew and cast_crew['directors']:
                         director_ids = []
                         for idx, director in enumerate(cast_crew['directors']):
-                            person_info = _build_person_info_payload(director.get("id"), c_name=None)
+                            person_info = _build_person_info_payload(
+                                director.get("id"),
+                                c_name=None,
+                                photo=(director or {}).get("photo"),
+                                photo_source=(director or {}).get("photo_source"),
+                            )
                             director_ids.append(notion_helper.get_relation_id(
                                 director['name'], notion_helper.director_database_id, USER_ICON_URL, {}, person_info
                             ))
@@ -901,6 +955,7 @@ def insert_movie(
                 if imdb_id:
                     print(f"  中文条目使用IMDB补充演员/导演信息")
                     cast_crew = get_imdb_cast_and_crew(imdb_id)
+                    cast_crew = _enrich_cast_crew_with_tmdb_fallback(imdb_id, subtype, cast_crew)
 
                     if cast_crew['actors'] and subject.get("actors"):
                         actor_relations = []
@@ -910,12 +965,24 @@ def insert_movie(
                             if not actor_name:
                                 continue
                             imdb_person_id = None
+                            actor_entry = None
                             if idx < len(cast_crew['actors']):
-                                imdb_person_id = (cast_crew['actors'][idx] or {}).get("id")
+                                actor_entry = cast_crew['actors'][idx] or {}
+                                imdb_person_id = actor_entry.get("id")
                             person_info = (
-                                _build_person_info_payload(imdb_person_id, c_name=actor_name)
+                                _build_person_info_payload(
+                                    imdb_person_id,
+                                    c_name=actor_name,
+                                    photo=(actor_entry or {}).get("photo"),
+                                    photo_source=(actor_entry or {}).get("photo_source"),
+                                )
                                 if imdb_person_id
-                                else None
+                                else _build_person_info_payload(
+                                    None,
+                                    c_name=actor_name,
+                                    photo=(actor_entry or {}).get("photo"),
+                                    photo_source=(actor_entry or {}).get("photo_source"),
+                                )
                             )
                             actor_id = notion_helper.get_relation_id(
                                 actor_name,
@@ -936,12 +1003,24 @@ def insert_movie(
                             if not director_name:
                                 continue
                             imdb_person_id = None
+                            director_entry = None
                             if idx < len(cast_crew['directors']):
-                                imdb_person_id = (cast_crew['directors'][idx] or {}).get("id")
+                                director_entry = cast_crew['directors'][idx] or {}
+                                imdb_person_id = director_entry.get("id")
                             person_info = (
-                                _build_person_info_payload(imdb_person_id, c_name=director_name)
+                                _build_person_info_payload(
+                                    imdb_person_id,
+                                    c_name=director_name,
+                                    photo=(director_entry or {}).get("photo"),
+                                    photo_source=(director_entry or {}).get("photo_source"),
+                                )
                                 if imdb_person_id
-                                else None
+                                else _build_person_info_payload(
+                                    None,
+                                    c_name=director_name,
+                                    photo=(director_entry or {}).get("photo"),
+                                    photo_source=(director_entry or {}).get("photo_source"),
+                                )
                             )
                             director_id = notion_helper.get_relation_id(
                                 director_name,
@@ -976,12 +1055,18 @@ def insert_movie(
                 if imdb_id:
                     print(f"  使用IMDB数据源获取演员/导演")
                     cast_crew = get_imdb_cast_and_crew(imdb_id)
+                    cast_crew = _enrich_cast_crew_with_tmdb_fallback(imdb_id, subtype, cast_crew)
 
                     # 添加演员（IMDB数据，包含详细信息和豆瓣中文名）
                     if cast_crew['actors']:
                         actor_relations = []
                         for idx, actor in enumerate(cast_crew['actors']):
-                            person_info = _build_person_info_payload(actor.get("id"), c_name=None)
+                            person_info = _build_person_info_payload(
+                                actor.get("id"),
+                                c_name=None,
+                                photo=(actor or {}).get("photo"),
+                                photo_source=(actor or {}).get("photo_source"),
+                            )
 
                             actor_id = notion_helper.get_relation_id(
                                 actor['name'],  # IMDB英文原名
@@ -1012,7 +1097,12 @@ def insert_movie(
                     if cast_crew['directors']:
                         director_relations = []
                         for idx, director in enumerate(cast_crew['directors']):
-                            person_info = _build_person_info_payload(director.get("id"), c_name=None)
+                            person_info = _build_person_info_payload(
+                                director.get("id"),
+                                c_name=None,
+                                photo=(director or {}).get("photo"),
+                                photo_source=(director or {}).get("photo_source"),
+                            )
 
                             director_id = notion_helper.get_relation_id(
                                 director['name'],  # IMDB英文原名
@@ -1111,7 +1201,7 @@ def get_imdb(link):
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36'}
         response = requests.get(link, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.content, features="lxml")
+        soup = _create_soup(response.content)
 
         # 尝试从页面文本中查找IMDB编号
         page_text = response.text
@@ -1653,15 +1743,24 @@ def _is_foreign_style_name(name, movie_name=None):
     return False
 
 
-def _build_person_info_payload(person_id, c_name=None):
+def _build_person_info_payload(person_id=None, c_name=None, photo=None, photo_source=None):
     """Build person payload even when IMDb detail is partially unavailable."""
-    if not person_id:
+    person_info_data = get_imdb_person_info(person_id) or {} if person_id else {}
+    nation = get_person_nation_from_birthplace(person_info_data.get("birthplace")) if person_info_data else None
+    resolved_photo = photo or person_info_data.get("photo")
+    resolved_source = photo_source
+    if not resolved_source and resolved_photo:
+        resolved_source = person_info_data.get("photo_source") or "TMDB"
+    if not resolved_photo and c_name:
+        tmdb_photo = get_tmdb_person_photo_by_name(c_name)
+        if tmdb_photo:
+            resolved_photo = tmdb_photo
+            resolved_source = "TMDB"
+    if not person_id and not resolved_photo:
         return None
-    person_info_data = get_imdb_person_info(person_id) or {}
-    nation = get_person_nation_from_birthplace(person_info_data.get("birthplace"))
     return {
-        "photo": person_info_data.get("photo"),
-        "photo_source": person_info_data.get("photo_source", "IMDB") if person_info_data.get("photo") else None,
+        "photo": resolved_photo,
+        "photo_source": resolved_source,
         "nation": nation,
         "imdb_id": person_id,
         "bio": person_info_data.get("bio"),
@@ -1873,7 +1972,7 @@ def search_imdb_by_title(title, year=None, media_type="movie"):
 
         response = requests.get(search_url, headers=headers, timeout=15)
         if response.status_code == 200:
-            soup = BeautifulSoup(response.content, features="lxml")
+            soup = _create_soup(response.content)
 
             # 取前几条候选，做标题一致性校验，避免命中错误作品
             results = soup.find_all('a', href=lambda x: x and '/title/tt' in x)
@@ -2093,6 +2192,158 @@ def get_tmdb_person_photo_by_imdb_id(imdb_person_id):
     return None
 
 
+def get_tmdb_person_photo_by_name(name):
+    if not TMDB_API_KEY or not name:
+        return None
+    cache_key = str(name).strip()
+    if not cache_key:
+        return None
+    if cache_key in TMDB_PERSON_PHOTO_BY_NAME_CACHE:
+        return TMDB_PERSON_PHOTO_BY_NAME_CACHE.get(cache_key)
+    try:
+        response = requests.get(
+            "https://api.themoviedb.org/3/search/person",
+            params={
+                "api_key": TMDB_API_KEY,
+                "query": cache_key,
+                "language": "zh-CN",
+                "include_adult": "false",
+                "page": 1,
+            },
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+        if response.status_code != 200:
+            TMDB_PERSON_PHOTO_BY_NAME_CACHE[cache_key] = None
+            return None
+        results = (response.json() or {}).get("results") or []
+        for item in results[:5]:
+            photo_url = _build_tmdb_profile_url((item or {}).get("profile_path"))
+            if photo_url and _is_valid_image_url(photo_url):
+                TMDB_PERSON_PHOTO_BY_NAME_CACHE[cache_key] = photo_url
+                return photo_url
+    except Exception:
+        TMDB_PERSON_PHOTO_BY_NAME_CACHE[cache_key] = None
+        return None
+    TMDB_PERSON_PHOTO_BY_NAME_CACHE[cache_key] = None
+    return None
+
+
+def _tmdb_people_from_credits(imdb_id, media_type):
+    result = {"actors": [], "directors": []}
+    imdb_id = _normalize_imdb_id(imdb_id)
+    if not TMDB_API_KEY or not imdb_id:
+        return result
+    cache_key = f"{imdb_id}:{media_type or ''}"
+    if cache_key in TMDB_CAST_CREW_BY_IMDB_CACHE:
+        return TMDB_CAST_CREW_BY_IMDB_CACHE.get(cache_key) or result
+    try:
+        find_resp = requests.get(
+            f"https://api.themoviedb.org/3/find/{imdb_id}",
+            params={
+                "api_key": TMDB_API_KEY,
+                "external_source": "imdb_id",
+                "language": "en-US",
+            },
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=12,
+        )
+        if find_resp.status_code != 200:
+            TMDB_CAST_CREW_BY_IMDB_CACHE[cache_key] = result
+            return result
+        find_data = find_resp.json() or {}
+        media_type = media_type if media_type in {"movie", "tv"} else None
+        if media_type == "tv":
+            entries = find_data.get("tv_results") or []
+            kind = "tv"
+        elif media_type == "movie":
+            entries = find_data.get("movie_results") or []
+            kind = "movie"
+        else:
+            entries = (find_data.get("movie_results") or []) + (find_data.get("tv_results") or [])
+            kind = "movie" if find_data.get("movie_results") else "tv"
+        if not entries:
+            TMDB_CAST_CREW_BY_IMDB_CACHE[cache_key] = result
+            return result
+        tmdb_id = entries[0].get("id")
+        if not tmdb_id:
+            TMDB_CAST_CREW_BY_IMDB_CACHE[cache_key] = result
+            return result
+
+        credits_resp = requests.get(
+            f"https://api.themoviedb.org/3/{kind}/{tmdb_id}/credits",
+            params={"api_key": TMDB_API_KEY, "language": "en-US"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=12,
+        )
+        credits_data = credits_resp.json() if credits_resp.status_code == 200 else {}
+        for cast_item in (credits_data.get("cast") or []):
+            name = str((cast_item or {}).get("name") or "").strip()
+            if not name:
+                continue
+            photo_url = _build_tmdb_profile_url((cast_item or {}).get("profile_path"))
+            resolved_photo = photo_url if (photo_url and _is_valid_image_url(photo_url)) else None
+            result["actors"].append(
+                {
+                    "name": name,
+                    "id": None,
+                    "photo": resolved_photo,
+                    "photo_source": "TMDB" if resolved_photo else None,
+                }
+            )
+            if len(result["actors"]) >= MAX_ACTORS_RELATION:
+                break
+
+        seen_director = set()
+        for crew_item in (credits_data.get("crew") or []):
+            job = str((crew_item or {}).get("job") or "")
+            dept = str((crew_item or {}).get("department") or "")
+            if kind == "movie":
+                if job != "Director":
+                    continue
+            else:
+                if "Director" not in job and dept != "Directing":
+                    continue
+            name = str((crew_item or {}).get("name") or "").strip()
+            if not name or name in seen_director:
+                continue
+            seen_director.add(name)
+            photo_url = _build_tmdb_profile_url((crew_item or {}).get("profile_path"))
+            resolved_photo = photo_url if (photo_url and _is_valid_image_url(photo_url)) else None
+            result["directors"].append(
+                {
+                    "name": name,
+                    "id": None,
+                    "photo": resolved_photo,
+                    "photo_source": "TMDB" if resolved_photo else None,
+                }
+            )
+            if len(result["directors"]) >= MAX_DIRECTORS_RELATION:
+                break
+
+        TMDB_CAST_CREW_BY_IMDB_CACHE[cache_key] = result
+        return result
+    except Exception:
+        TMDB_CAST_CREW_BY_IMDB_CACHE[cache_key] = result
+        return result
+
+
+def _enrich_cast_crew_with_tmdb_fallback(imdb_id, media_type, cast_crew):
+    base = cast_crew or {"actors": [], "directors": []}
+    if not imdb_id:
+        return base
+    needs_actor = not (base.get("actors") or [])
+    needs_director = not (base.get("directors") or [])
+    if not needs_actor and not needs_director:
+        return base
+    tmdb_result = _tmdb_people_from_credits(imdb_id, media_type)
+    if needs_actor and tmdb_result.get("actors"):
+        base["actors"] = tmdb_result.get("actors")
+    if needs_director and tmdb_result.get("directors"):
+        base["directors"] = tmdb_result.get("directors")
+    return base
+
+
 def get_imdb_person_info(person_id):
     """从IMDB获取演员/导演详细信息"""
     if not person_id:
@@ -2117,7 +2368,7 @@ def get_imdb_person_info(person_id):
 
         response = requests.get(url, headers=headers, timeout=15)
         if response.status_code == 200:
-            soup = BeautifulSoup(response.content, features="lxml")
+            soup = _create_soup(response.content)
 
             # 从JSON-LD获取信息
             script_tags = soup.find_all('script', {'type': 'application/ld+json'})
@@ -2223,7 +2474,7 @@ def get_imdb_cast_and_crew(imdb_id):
 
         response = requests.get(url, headers=headers, timeout=20)
         if response.status_code == 200:
-            soup = BeautifulSoup(response.content, features="lxml")
+            soup = _create_soup(response.content)
 
             # 从JSON-LD提取演员和导演
             script_tags = soup.find_all('script', {'type': 'application/ld+json'})
@@ -2281,7 +2532,7 @@ def get_imdb_cast_and_crew(imdb_id):
         url = f"https://www.imdb.com/title/{imdb_id}/fullcredits"
         response = requests.get(url, headers=headers, timeout=20)
         if response.status_code == 200:
-            soup = BeautifulSoup(response.content, features="lxml")
+            soup = _create_soup(response.content)
 
             # 先记录已有ID，再从fullcredits补齐
             seen_ids = set()
@@ -2354,7 +2605,7 @@ def get_imdb_info(imdb_id):
         }
         response = requests.get(url, headers=headers, timeout=15)
         if response.status_code == 200:
-            soup = BeautifulSoup(response.content, features="lxml")
+            soup = _create_soup(response.content)
 
             # 获取海报
             poster = soup.find('img', {'class': lambda x: x and 'ipc-image' in x})
@@ -2442,7 +2693,7 @@ def get_goodreads_cover(title, author=None, isbn=None):
             try:
                 response = requests.get(search_url, headers=headers, timeout=20, allow_redirects=True)
                 if response.status_code == 200:
-                    soup = BeautifulSoup(response.content, features="lxml")
+                    soup = _create_soup(response.content)
 
                     # 查找第一个搜索结果的封面
                     cover_img = soup.find('img', {'class': lambda x: x and 'bookCover' in str(x)})
