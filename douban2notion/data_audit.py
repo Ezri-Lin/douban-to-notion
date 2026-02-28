@@ -7,6 +7,7 @@ import pendulum
 import requests
 from dotenv import load_dotenv
 
+from douban2notion.douban import get_imdb_info, _is_imdb_title_consistent
 from douban2notion.notion_helper import NotionHelper
 from douban2notion.utils import get_property_value
 
@@ -31,6 +32,7 @@ ISSUE_FOREIGN_ACTOR_CHINESE = "ForeignActorChinese"
 ISSUE_FOREIGN_DIRECTOR_CHINESE = "ForeignDirectorChinese"
 ISSUE_DUPLICATE_DB_URL = "DuplicateDBUrl"
 ISSUE_DUPLICATE_IMDB = "DuplicateIMDB"
+ISSUE_IMDB_TITLE_MISMATCH = "IMDBTitleMismatch"
 
 MANAGED_ISSUES = {
     ISSUE_MISSING_IMDB,
@@ -49,6 +51,7 @@ MANAGED_ISSUES = {
     ISSUE_FOREIGN_DIRECTOR_CHINESE,
     ISSUE_DUPLICATE_DB_URL,
     ISSUE_DUPLICATE_IMDB,
+    ISSUE_IMDB_TITLE_MISMATCH,
 }
 
 
@@ -132,6 +135,29 @@ def _normalize_movie_imdb_id(imdb_id: Optional[str]) -> Optional[str]:
     if not re.match(r"^tt\d{7,8}$", candidate):
         return None
     return candidate
+
+
+def _is_imdb_binding_consistent(name: Optional[str], movie_name: Optional[str], imdb_title: Optional[str]) -> bool:
+    """用现有一致性规则做保守判断，抓明显错绑。"""
+    if not imdb_title:
+        return True
+    candidates = []
+    if name:
+        candidates.append(str(name).strip())
+    if movie_name:
+        candidates.append(str(movie_name).strip())
+    if not candidates:
+        return True
+    for title in candidates:
+        aliases = [x for x in candidates if x != title]
+        if _is_imdb_title_consistent(
+            title,
+            imdb_title,
+            original_title=(aliases[0] if aliases else None),
+            alias_titles=aliases,
+        ):
+            return True
+    return False
 
 
 def _normalize_person_imdb_id(imdb_id: Optional[str]) -> Optional[str]:
@@ -319,6 +345,11 @@ def audit_movie(nh: NotionHelper, check_remote: bool, limit: int = 0) -> Tuple[i
             issues.add(ISSUE_DUPLICATE_DB_URL)
         if imdb_norm and len(imdb_map.get(imdb_norm) or []) > 1:
             issues.add(ISSUE_DUPLICATE_IMDB)
+        if imdb_norm:
+            imdb_info = get_imdb_info(imdb_norm) or {}
+            imdb_title = imdb_info.get("title")
+            if not _is_imdb_binding_consistent(name, movie_name, imdb_title):
+                issues.add(ISSUE_IMDB_TITLE_MISMATCH)
 
         updates: Dict = {}
         _append_data_issue_update(page, sorted(issues), updates)
