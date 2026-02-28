@@ -220,6 +220,18 @@ def _append_date_update_if_exists(page: Dict, field_name: str, updates: Dict) ->
         updates[field_name] = _now_date_payload()
 
 
+def _append_status_and_checked_at_if_changed(
+    page: Dict,
+    status_field: str,
+    status_value: str,
+    checked_field: str,
+    updates: Dict,
+) -> None:
+    _append_select_update_if_changed(page, status_field, status_value, updates)
+    if status_field in updates:
+        _append_date_update_if_exists(page, checked_field, updates)
+
+
 def _append_data_issue_update(page: Dict, issues: Sequence[str], updates: Dict) -> None:
     properties = page.get("properties") or {}
     if "DataIssue" not in properties:
@@ -312,14 +324,11 @@ def audit_movie(nh: NotionHelper, check_remote: bool, limit: int = 0) -> Tuple[i
         _append_data_issue_update(page, sorted(issues), updates)
 
         if ISSUE_MISSING_COVER in issues:
-            _append_select_update_if_changed(page, "CoverStatus", "Missing", updates)
-            _append_date_update_if_exists(page, "CoverCheckedAt", updates)
+            _append_status_and_checked_at_if_changed(page, "CoverStatus", "Missing", "CoverCheckedAt", updates)
         elif ISSUE_BROKEN_COVER in issues:
-            _append_select_update_if_changed(page, "CoverStatus", "Broken", updates)
-            _append_date_update_if_exists(page, "CoverCheckedAt", updates)
+            _append_status_and_checked_at_if_changed(page, "CoverStatus", "Broken", "CoverCheckedAt", updates)
         else:
-            _append_select_update_if_changed(page, "CoverStatus", "Ok", updates)
-            _append_date_update_if_exists(page, "CoverCheckedAt", updates)
+            _append_status_and_checked_at_if_changed(page, "CoverStatus", "Ok", "CoverCheckedAt", updates)
 
         if _update_page_properties(nh.client, page, updates):
             changed += 1
@@ -374,14 +383,11 @@ def _audit_people_common(
         _append_data_issue_update(page, sorted(issues), updates)
 
         if ISSUE_MISSING_PHOTO in issues:
-            _append_select_update_if_changed(page, "PhotoStatus", "Missing", updates)
-            _append_date_update_if_exists(page, "PhotoCheckedAt", updates)
+            _append_status_and_checked_at_if_changed(page, "PhotoStatus", "Missing", "PhotoCheckedAt", updates)
         elif ISSUE_BROKEN_PHOTO in issues:
-            _append_select_update_if_changed(page, "PhotoStatus", "Broken", updates)
-            _append_date_update_if_exists(page, "PhotoCheckedAt", updates)
+            _append_status_and_checked_at_if_changed(page, "PhotoStatus", "Broken", "PhotoCheckedAt", updates)
         else:
-            _append_select_update_if_changed(page, "PhotoStatus", "Ok", updates)
-            _append_date_update_if_exists(page, "PhotoCheckedAt", updates)
+            _append_status_and_checked_at_if_changed(page, "PhotoStatus", "Ok", "PhotoCheckedAt", updates)
 
         if _update_page_properties(nh.client, page, updates):
             changed += 1
@@ -450,14 +456,11 @@ def audit_book(nh: NotionHelper, check_remote: bool, limit: int = 0) -> Tuple[in
         _append_data_issue_update(page, sorted(issues), updates)
 
         if ISSUE_MISSING_COVER in issues:
-            _append_select_update_if_changed(page, "CoverStatus", "Missing", updates)
-            _append_date_update_if_exists(page, "CoverCheckedAt", updates)
+            _append_status_and_checked_at_if_changed(page, "CoverStatus", "Missing", "CoverCheckedAt", updates)
         elif ISSUE_BROKEN_COVER in issues:
-            _append_select_update_if_changed(page, "CoverStatus", "Broken", updates)
-            _append_date_update_if_exists(page, "CoverCheckedAt", updates)
+            _append_status_and_checked_at_if_changed(page, "CoverStatus", "Broken", "CoverCheckedAt", updates)
         else:
-            _append_select_update_if_changed(page, "CoverStatus", "Ok", updates)
-            _append_date_update_if_exists(page, "CoverCheckedAt", updates)
+            _append_status_and_checked_at_if_changed(page, "CoverStatus", "Ok", "CoverCheckedAt", updates)
 
         if _update_page_properties(nh.client, page, updates):
             changed += 1
