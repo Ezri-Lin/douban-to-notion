@@ -227,6 +227,15 @@ class NotionHelper:
         self.__url_validity_cache[url] = ok
         return ok
 
+    @staticmethod
+    def _get_title_property_name(db_properties):
+        if not db_properties:
+            return "Name"
+        for prop_name, prop in db_properties.items():
+            if (prop or {}).get("type") == "title":
+                return prop_name
+        return "Name"
+
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def get_relation_id(self, name, id, icon, properties=None, person_info=None):
         """获取或创建关系实体的ID（Actor/Director/Category 等）"""
@@ -237,6 +246,7 @@ class NotionHelper:
             return self.__cache.get(key)
         imdb_id = (person_info or {}).get("imdb_id")
         db_properties = (self.get_database_schema(id).get("properties") or {})
+        title_property_name = self._get_title_property_name(db_properties)
 
         # Prefer stable identity matching by IMDB id to avoid same-name collisions.
         response = {"results": []}
@@ -245,11 +255,11 @@ class NotionHelper:
             response = self.client.databases.query(database_id=id, filter=imdb_filter)
             # With IMDB id, do not fall back to Name matching; that can bind wrong people.
         elif len(response.get("results")) == 0:
-            name_filter = {"property": "Name", "title": {"equals": name}}
+            name_filter = {"property": title_property_name, "title": {"equals": name}}
             response = self.client.databases.query(database_id=id, filter=name_filter)
         if len(response.get("results")) == 0:
             parent = {"database_id": id, "type": "database_id"}
-            properties["Name"] = get_title(name)
+            properties[title_property_name] = get_title(name)
 
             if person_info:
                 now_ts = int(time.time())
