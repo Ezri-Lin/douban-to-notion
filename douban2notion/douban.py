@@ -1,4 +1,5 @@
 import argparse
+import html
 import json
 import os
 import re
@@ -74,6 +75,7 @@ _SOUP_FALLBACK_NOTIFIED = False
 
 # 豆瓣中文标题 -> IMDB英文检索词（通过环境变量配置，避免硬编码样本数据）
 DEFAULT_IMDB_TITLE_ALIAS_MAP = {}
+DEFAULT_IMDB_OVERRIDE_MAP = {}
 DEFAULT_TMDB_ID_OVERRIDE_MAP = {}
 
 
@@ -106,6 +108,33 @@ def _load_imdb_alias_map():
 
 
 IMDB_TITLE_ALIAS_MAP = _load_imdb_alias_map()
+
+
+def _load_imdb_override_map():
+    """支持通过环境变量为特定条目指定IMDb ID，避免高风险标题误绑。"""
+    override_map = dict(DEFAULT_IMDB_OVERRIDE_MAP)
+    raw = os.getenv("IMDB_OVERRIDE_JSON", "").strip()
+    if not raw:
+        return override_map
+    try:
+        custom = json.loads(raw)
+        if isinstance(custom, dict):
+            for key, value in custom.items():
+                if not key or value is None:
+                    continue
+                imdb_id = None
+                if isinstance(value, dict):
+                    imdb_id = str(value.get("imdb_id") or value.get("id") or "").strip()
+                else:
+                    imdb_id = str(value).strip()
+                if re.match(r"^tt\d{7,8}$", imdb_id):
+                    override_map[str(key).strip()] = imdb_id
+    except Exception:
+        print("  IMDB_OVERRIDE_JSON 解析失败，忽略自定义映射")
+    return override_map
+
+
+IMDB_OVERRIDE_MAP = _load_imdb_override_map()
 
 
 def _load_tmdb_id_override_map():
@@ -713,6 +742,7 @@ def insert_movie(
             lookup_year = _lookup_year_for_imdb(douban_title, subtype, movie.get("Year"))
             tmdb_poster = None
             notion_imdb_id = _normalize_imdb_id(notion_movive.get("IMDB"))
+            imdb_override = _get_imdb_override(douban_title=douban_title, douban_url=movie.get("DB_Url"))
             existing_imdb_consistent = True
             if notion_imdb_id and repair_flags.get("imdb"):
                 existing_imdb_consistent = _is_existing_imdb_consistent(
@@ -725,7 +755,11 @@ def insert_movie(
                     douban_url=movie.get("DB_Url"),
                 )
             fallback_existing_imdb = notion_imdb_id if existing_imdb_consistent else None
-            imdb_id = notion_imdb_id or get_imdb(movie.get("DB_Url"))
+            if imdb_override:
+                imdb_id = imdb_override
+                print(f"  使用IMDB覆盖配置: {imdb_id}")
+            else:
+                imdb_id = notion_imdb_id or get_imdb(movie.get("DB_Url"))
             if imdb_id and not _is_imdb_media_type_compatible(imdb_id, subtype):
                 imdb_id = None
             if notion_imdb_id and repair_flags.get("imdb") and not existing_imdb_consistent:
@@ -791,6 +825,22 @@ def insert_movie(
                         print(f"  重检未命中，保留Notion已有IMDB: {imdb_id}")
                     if not found_by_search:
                         print(f"  IMDB检索失败: {douban_title} ({movie.get('Year')}, {subtype})")
+            if (
+                imdb_id
+                and not imdb_override
+                and repair_flags.get("imdb")
+                and imdb_id != notion_imdb_id
+                and not _is_imdb_candidate_high_confidence(
+                    imdb_id,
+                    douban_title,
+                    original_title=original_title,
+                    alias_titles=alias_titles,
+                    expected_year=movie.get("Year"),
+                    expected_media_type=subtype,
+                )
+            ):
+                print(f"  IMDB候选低置信，忽略覆盖: {imdb_id}")
+                imdb_id = fallback_existing_imdb
             clear_stale_imdb = bool(
                 repair_flags.get("imdb")
                 and notion_imdb_id
@@ -1070,11 +1120,9 @@ def insert_movie(
                 movie.pop("_alias_titles", None)
                 movie.pop("_is_chinese", None)
 
+                # 保护策略：当本轮抓取不到 IMDB 相关值时，不覆盖 Notion 已有值。
+                # 仅在拿到明确新值时更新，避免“已有 IMDB 被清空”。
                 properties = utils.get_properties(movie, movie_properties_type_dict)
-                if clear_stale_imdb:
-                    properties["IMDB"] = {"rich_text": []}
-                    properties["IMDB_Url"] = {"url": None}
-                    properties["IMDBRating"] = {"number": None}
                 movie_display = f"{movie.get('Name', notion_movive.get('Name') or 'N/A')}"
                 if movie.get("MovieName"):
                     movie_display += f" / {movie.get('MovieName')}"
@@ -1111,17 +1159,17 @@ def insert_movie(
                     "IMDB": (
                         movie["IMDB"]
                         if "IMDB" in movie
-                        else (None if clear_stale_imdb else notion_movive.get("IMDB"))
+                        else notion_movive.get("IMDB")
                     ),
                     "IMDB_Url": (
                         movie["IMDB_Url"]
                         if "IMDB_Url" in movie
-                        else (None if clear_stale_imdb else notion_movive.get("IMDB_Url"))
+                        else notion_movive.get("IMDB_Url")
                     ),
                     "IMDBRating": (
                         movie["IMDBRating"]
                         if "IMDBRating" in movie
-                        else (None if clear_stale_imdb else notion_movive.get("IMDBRating"))
+                        else notion_movive.get("IMDBRating")
                     ),
                     "Name": movie.get("Name", notion_movive.get("Name")),
                     "MovieName": movie.get("MovieName", notion_movive.get("MovieName")),
@@ -1172,7 +1220,12 @@ def insert_movie(
                 alias_titles = resolved_alias_titles
             lookup_year = _lookup_year_for_imdb(douban_title, subtype, movie.get("Year"))
             tmdb_poster = None
-            imdb_id = get_imdb(movie.get("DB_Url"))
+            imdb_override = _get_imdb_override(douban_title=douban_title, douban_url=movie.get("DB_Url"))
+            if imdb_override:
+                imdb_id = imdb_override
+                print(f"  使用IMDB覆盖配置: {imdb_id}")
+            else:
+                imdb_id = get_imdb(movie.get("DB_Url"))
             if imdb_id and not _is_imdb_media_type_compatible(imdb_id, subtype):
                 imdb_id = None
             if not imdb_id:
@@ -1222,6 +1275,20 @@ def insert_movie(
                             print(f"  从同系列条目继承IMDB: {imdb_id}")
                     if not found_by_search:
                         print(f"  IMDB检索失败: {douban_title} ({movie.get('Year')}, {subtype})")
+            if (
+                imdb_id
+                and not imdb_override
+                and not _is_imdb_candidate_high_confidence(
+                    imdb_id,
+                    douban_title,
+                    original_title=original_title,
+                    alias_titles=alias_titles,
+                    expected_year=movie.get("Year"),
+                    expected_media_type=subtype,
+                )
+            ):
+                print(f"  IMDB候选低置信，放弃写入: {imdb_id}")
+                imdb_id = None
 
             imdb_info = None
             if imdb_id:
@@ -1581,9 +1648,170 @@ def get_imdb(link):
                 if span.string and 'IMDb:' == span.string:
                     imdb_id = span.next_sibling.string.strip()
                     return imdb_id
+
+        # HTML结构化兜底（参考 notion_sync_data 的详情页解析方式）
+        detail = parse_douban_detail_html(link, html_text=response.text, soup=soup)
+        if detail.get("imdb"):
+            return detail.get("imdb")
     except Exception as e:
         print(f"  从豆瓣获取IMDB编号失败: {str(e)[:50]}")
     return None
+
+
+def _douban_info_strings(soup):
+    info = soup.select('#info')
+    if not info:
+        return []
+    infos = list(info[0].strings)
+    return [i.strip() for i in infos if i and i.strip()]
+
+
+def _douban_get_single_info_str(str_list, str_key):
+    return str_list[str_list.index(str_key) + 1] if str_key in str_list else ""
+
+
+def _douban_get_single_info_list(infos_list, str_key):
+    values = []
+    if str_key not in infos_list:
+        return values
+    raw = infos_list[infos_list.index(str_key) + 1]
+    for item in str(raw).split('/'):
+        text = item.strip()
+        if text:
+            values.append(text)
+    return values
+
+
+def _douban_get_multiple_infos_list(infos_list, str_key, next_number):
+    values = []
+    if str_key not in infos_list:
+        return values
+    try:
+        idx = infos_list.index(str_key) + next_number
+        values.append(infos_list[idx])
+        while idx + 1 < len(infos_list) and infos_list[idx + 1] == '/':
+            idx += 2
+            if idx >= len(infos_list):
+                break
+            values.append(infos_list[idx])
+    except Exception:
+        return []
+    return [str(x).strip() for x in values if str(x).strip()]
+
+
+def parse_douban_detail_html(link, html_text=None, soup=None):
+    """
+    从豆瓣详情页HTML提取字段（API失败时兜底）。
+    参考 notion_sync_data 的 #info 解析方式，并补充 IMDb/评分/封面抽取。
+    """
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36'
+        }
+        if not html_text or soup is None:
+            response = requests.get(link, headers=headers, timeout=10)
+            html_text = response.text
+            soup = _create_soup(response.content)
+
+        infos = _douban_info_strings(soup)
+        result = {
+            "imdb": None,
+            "directors": [],
+            "actors": [],
+            "countries": [],
+            "languages": [],
+            "year": None,
+            "rating": None,
+            "cover": None,
+        }
+
+        if infos:
+            imdb = _douban_get_single_info_str(infos, "IMDb:")
+            if imdb and re.match(r"^tt\d{7,8}$", imdb):
+                result["imdb"] = imdb
+            result["directors"] = _douban_get_multiple_infos_list(infos, "导演", 2)
+            result["actors"] = _douban_get_multiple_infos_list(infos, "主演", 2)
+            result["countries"] = _douban_get_single_info_list(infos, "制片国家/地区:")
+            result["languages"] = _douban_get_single_info_list(infos, "语言:")
+
+        if not result["imdb"] and html_text:
+            matches = re.findall(r"tt\d{7,8}", html_text)
+            if matches:
+                result["imdb"] = matches[0]
+
+        year_tag = soup.select_one('#wrapper > div > h1 > span:last-of-type')
+        if year_tag:
+            year_text = str(year_tag.text).strip().strip('()')
+            if re.match(r"^\d{4}$", year_text):
+                result["year"] = year_text
+
+        rating_tag = soup.select_one("strong[property='v:average']") or soup.select_one("strong.ll.rating_num")
+        if rating_tag:
+            rating_text = str(rating_tag.text).strip()
+            try:
+                rating_value = float(rating_text)
+                if rating_value > 0:
+                    result["rating"] = rating_value
+            except Exception:
+                pass
+
+        cover_tag = soup.select_one("#mainpic img")
+        if cover_tag and cover_tag.get("src"):
+            cover = str(cover_tag.get("src")).strip()
+            if cover:
+                result["cover"] = cover
+
+        blocked = False
+        if html_text:
+            blocked = ("sec.douban.com/c?" in html_text) or ("有异常请求从你的 IP 发出" in html_text)
+
+        # 桌面页被风控时，回退到 m.douban 的静态元信息（可稳定拿到rating与qnmob封面）
+        if blocked or (not result["rating"] and not result["cover"] and not result["imdb"]):
+            subject_id = _extract_douban_id_from_url(link)
+            if subject_id:
+                mobile_url = f"https://m.douban.com/movie/subject/{subject_id}/"
+                mobile_headers = {
+                    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.3 Mobile/15E148 Safari/604.1',
+                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                }
+                mobile_resp = requests.get(mobile_url, headers=mobile_headers, timeout=10)
+                mobile_soup = _create_soup(mobile_resp.content)
+
+                rating_meta = mobile_soup.select_one("meta[itemprop='ratingValue']")
+                if rating_meta and rating_meta.get("content"):
+                    try:
+                        mobile_rating = float(str(rating_meta.get("content")).strip())
+                        if mobile_rating > 0:
+                            result["rating"] = mobile_rating
+                    except Exception:
+                        pass
+
+                if not result["year"]:
+                    origin_tag = mobile_soup.select_one(".sub-original-title")
+                    if origin_tag:
+                        year_match = re.search(r"（(\d{4})）", origin_tag.get_text(" ", strip=True))
+                        if year_match:
+                            result["year"] = year_match.group(1)
+
+                # 优先使用移动端og:image（常为qnmob*.doubanio.com，可绕过部分418）
+                og_image = mobile_soup.select_one("meta[property='og:image']")
+                if og_image and og_image.get("content"):
+                    mobile_cover = str(og_image.get("content")).strip()
+                    if mobile_cover:
+                        result["cover"] = mobile_cover
+
+        return result
+    except Exception:
+        return {
+            "imdb": None,
+            "directors": [],
+            "actors": [],
+            "countries": [],
+            "languages": [],
+            "year": None,
+            "rating": None,
+            "cover": None,
+        }
 
 def _strip_season(title):
     """去掉标题中的季数后缀，如'黑镜 第三季'/'Succession Season 3'"""
@@ -1727,9 +1955,13 @@ def _is_existing_imdb_consistent(
         return False
     imdb_info = get_imdb_info(imdb_id) or {}
     imdb_title = imdb_info.get("title")
+    imdb_year = imdb_info.get("year")
     if not imdb_title:
         # Unknown title: keep existing value unless stronger evidence is found.
         return True
+    if expected_year and imdb_year and str(expected_year).isdigit() and str(imdb_year).isdigit():
+        if abs(int(imdb_year) - int(expected_year)) > 2:
+            return False
     title_consistent = _is_imdb_title_consistent(
         douban_title,
         imdb_title,
@@ -1773,6 +2005,51 @@ def _extract_douban_id_from_url(url):
     if not match:
         return None
     return match.group(1)
+
+
+def _get_imdb_override(douban_title=None, douban_url=None):
+    douban_id = _extract_douban_id_from_url(douban_url)
+    if douban_id and IMDB_OVERRIDE_MAP.get(douban_id):
+        return _normalize_imdb_id(IMDB_OVERRIDE_MAP.get(douban_id))
+    title_text = str(douban_title or "").strip()
+    if title_text and IMDB_OVERRIDE_MAP.get(title_text):
+        return _normalize_imdb_id(IMDB_OVERRIDE_MAP.get(title_text))
+    if douban_url:
+        for key, imdb_id in IMDB_OVERRIDE_MAP.items():
+            if key.startswith("http") and key in douban_url:
+                return _normalize_imdb_id(imdb_id)
+    return None
+
+
+def _is_imdb_candidate_high_confidence(
+    imdb_id,
+    douban_title,
+    original_title=None,
+    alias_titles=None,
+    expected_year=None,
+    expected_media_type=None,
+):
+    imdb_id = _normalize_imdb_id(imdb_id)
+    if not imdb_id:
+        return False
+    if expected_media_type and not _is_imdb_media_type_compatible(imdb_id, expected_media_type):
+        return False
+    imdb_info = get_imdb_info(imdb_id) or {}
+    imdb_title = imdb_info.get("title")
+    if not imdb_title:
+        return False
+    if not _is_imdb_title_consistent(
+        douban_title,
+        imdb_title,
+        original_title=original_title,
+        alias_titles=alias_titles,
+    ):
+        return False
+    imdb_year = imdb_info.get("year")
+    if expected_year and imdb_year and str(expected_year).isdigit() and str(imdb_year).isdigit():
+        if abs(int(imdb_year) - int(expected_year)) > 2:
+            return False
+    return True
 
 
 def _extract_alias_titles(subject):
@@ -2290,6 +2567,12 @@ def _is_imdb_title_consistent(douban_title, imdb_title, original_title=None, ali
             if longer > 0 and (shorter / longer) >= 0.8:
                 return True
 
+        if len(candidate_norm) <= 4:
+            imdb_head = re.split(r"[:\-–—\(\[]", imdb_title.lower())[0]
+            imdb_head_norm = _normalize_ascii_title(imdb_head)
+            if candidate_norm and candidate_norm == imdb_head_norm:
+                return True
+
         candidate_words = set(re.findall(r"[a-z0-9]+", candidate.lower()))
         if len(candidate_words) < 3:
             continue
@@ -2752,7 +3035,7 @@ def get_imdb_person_info(person_id):
                     data = json.loads(script.string)
                     if isinstance(data, dict):
                         if 'name' in data and not result['name']:
-                            result['name'] = data['name']
+                            result['name'] = html.unescape(str(data['name']).strip())
                         if 'image' in data and not result['photo'] and _is_valid_image_url(data['image']):
                             result['photo'] = data['image']
                             result['photo_source'] = 'IMDB'
@@ -2782,7 +3065,7 @@ def get_imdb_person_info(person_id):
                 # 尝试从页面标题或h1标签获取
                 title_tag = soup.find('h1')
                 if title_tag:
-                    result['name'] = title_tag.get_text().strip()
+                    result['name'] = html.unescape(title_tag.get_text().strip())
 
     except Exception as e:
         print(f"  获取人物信息失败 ({person_id}): {str(e)[:50]}")
@@ -2873,7 +3156,7 @@ def get_imdb_cast_and_crew(imdb_id):
                             person_id = person_id_match.group(1) if person_id_match else None
                             if len(result['directors']) < MAX_DIRECTORS_RELATION:
                                 result['directors'].append({
-                                    'name': d['name'],
+                                    'name': html.unescape(str(d['name']).strip()),
                                     'id': person_id
                                 })
 
@@ -2888,7 +3171,7 @@ def get_imdb_cast_and_crew(imdb_id):
                             person_id = person_id_match.group(1) if person_id_match else None
                             if len(result['actors']) < MAX_ACTORS_RELATION:
                                 result['actors'].append({
-                                    'name': a['name'],
+                                    'name': html.unescape(str(a['name']).strip()),
                                     'id': person_id
                                 })
 
@@ -2994,7 +3277,7 @@ def get_imdb_info(imdb_id):
             # 标题：优先从 h1 获取（IMDB h1 显示英文/本地化标题，JSON-LD 可能返回原语言罗马化）
             title_tag = soup.find('h1')
             if title_tag:
-                result['title'] = title_tag.get_text().strip()
+                result['title'] = html.unescape(title_tag.get_text().strip())
 
             # 从JSON-LD结构化数据中获取评分和海报
             script_tags = soup.find_all('script', {'type': 'application/ld+json'})
@@ -3004,7 +3287,7 @@ def get_imdb_info(imdb_id):
                     if isinstance(data, dict):
                         # 如果h1没取到标题，用JSON-LD兜底
                         if 'name' in data and not result['title']:
-                            result['title'] = data['name']
+                            result['title'] = html.unescape(str(data['name']).strip())
                         # 获取评分
                         if 'aggregateRating' in data:
                             rating_value = data['aggregateRating'].get('ratingValue')

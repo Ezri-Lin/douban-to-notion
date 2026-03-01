@@ -93,14 +93,23 @@ def update_page_media(client, page_id: str, property_name: Optional[str], image_
     client.pages.update(**payload)
 
 
-def update_check_fields(client, page, status_field: str, checked_field: str, source_field: Optional[str], status: str, source: Optional[str] = None):
+def update_check_fields(
+    client,
+    page,
+    status_field: str,
+    checked_field: Optional[str],
+    source_field: Optional[str],
+    status: str,
+    source: Optional[str] = None,
+    update_checked_at: bool = True,
+):
     props = page.get("properties") or {}
     update_properties = {}
     if status_field in props:
         current_status = get_property_value(props.get(status_field) or {})
         if current_status != status:
             update_properties[status_field] = {"select": {"name": status}}
-    if checked_field in props:
+    if update_checked_at and checked_field and checked_field in props:
         update_properties[checked_field] = now_date_payload()
     if source_field and source_field in props and source:
         current_source = get_property_value(props.get(source_field) or {})
@@ -108,6 +117,26 @@ def update_check_fields(client, page, status_field: str, checked_field: str, sou
             update_properties[source_field] = {"select": {"name": source}}
     if update_properties:
         client.pages.update(page_id=page.get("id"), properties=update_properties)
+
+
+def remove_data_issue_tags(client, page, tags_to_remove):
+    props = page.get("properties") or {}
+    data_issue = props.get("DataIssue") or {}
+    if data_issue.get("type") != "multi_select":
+        return
+    existing = [x.get("name") for x in (data_issue.get("multi_select") or []) if x.get("name")]
+    if not existing:
+        return
+    remove_set = {str(x).strip() for x in (tags_to_remove or []) if str(x).strip()}
+    if not remove_set:
+        return
+    final = [x for x in existing if x not in remove_set]
+    if final == existing:
+        return
+    client.pages.update(
+        page_id=page.get("id"),
+        properties={"DataIssue": {"multi_select": [{"name": x} for x in final]}},
+    )
 
 
 def get_openlibrary_book_cover(isbn: Optional[str]) -> Optional[str]:
@@ -194,23 +223,40 @@ def validate_movie_covers(nh: NotionHelper):
         cover_url = get_cover_url(page)
         valid = is_valid_image_url(prop_cover) and is_valid_image_url(icon_url) and is_valid_image_url(cover_url)
         if valid:
-            update_check_fields(nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok")
+            update_check_fields(
+                nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok", update_checked_at=False
+            )
+            remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
             continue
 
         imdb_id = get_rich_text_value(page, "IMDB")
         if not imdb_id:
             status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
-            update_check_fields(nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status)
+            update_check_fields(
+                nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status, update_checked_at=False
+            )
             continue
         imdb_info = get_imdb_info(imdb_id)
         new_cover = (imdb_info or {}).get("poster")
         if not new_cover or not is_valid_image_url(new_cover):
             status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
-            update_check_fields(nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status)
+            update_check_fields(
+                nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status, update_checked_at=False
+            )
             continue
         try:
             update_page_media(nh.client, page_id, "Cover", new_cover, write_property=True)
-            update_check_fields(nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok", "IMDB")
+            update_check_fields(
+                nh.client,
+                page,
+                "CoverStatus",
+                "CoverCheckedAt",
+                "CoverSource",
+                "Ok",
+                "IMDB",
+                update_checked_at=False,
+            )
+            remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
             fixed += 1
         except Exception:
             continue
@@ -229,7 +275,10 @@ def validate_book_covers(nh: NotionHelper):
         cover_url = get_cover_url(page)
         valid = is_valid_image_url(prop_cover) and is_valid_image_url(icon_url) and is_valid_image_url(cover_url)
         if valid:
-            update_check_fields(nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok")
+            update_check_fields(
+                nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok", update_checked_at=False
+            )
+            remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
             continue
 
         title = get_title_value(page, "Name")
@@ -246,12 +295,24 @@ def validate_book_covers(nh: NotionHelper):
             source = "OpenLibrary"
         if not new_cover:
             status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
-            update_check_fields(nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status)
+            update_check_fields(
+                nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status, update_checked_at=False
+            )
             continue
 
         try:
             update_page_media(nh.client, page_id, "Cover", new_cover, write_property=True)
-            update_check_fields(nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok", source)
+            update_check_fields(
+                nh.client,
+                page,
+                "CoverStatus",
+                "CoverCheckedAt",
+                "CoverSource",
+                "Ok",
+                source,
+                update_checked_at=False,
+            )
+            remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
             fixed += 1
         except Exception:
             continue
