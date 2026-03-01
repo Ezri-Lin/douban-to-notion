@@ -39,4 +39,4 @@ jobs:
         run: python -m compileall douban2notion
 
       - name: Audit all data
-        run: python -u -m douban2notion.data_audit all --skip-url-check
+        run: python -u -m douban2notion.data_audit all --skip-url-check --enable-person-name-mismatch
