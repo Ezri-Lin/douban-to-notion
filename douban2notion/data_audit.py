@@ -1,4 +1,5 @@
 import argparse
+import html
 import re
 from collections import defaultdict
 from typing import Dict, List, Optional, Sequence, Set, Tuple
@@ -7,7 +8,12 @@ import pendulum
 import requests
 from dotenv import load_dotenv
 
-from douban2notion.douban import get_imdb_info, search_imdb_by_title, _is_imdb_title_consistent
+from douban2notion.douban import (
+    get_imdb_info,
+    get_imdb_person_info,
+    search_imdb_by_title,
+    _is_imdb_title_consistent,
+)
 from douban2notion.notion_helper import NotionHelper
 from douban2notion.utils import get_property_value
 
@@ -35,6 +41,7 @@ ISSUE_DUPLICATE_IMDB = "DuplicateIMDB"
 ISSUE_IMDB_TITLE_MISMATCH = "IMDBTitleMismatch"
 ISSUE_MISSING_DOUBAN_RATING = "MissingDoubanRating"
 ISSUE_MISSING_IMDB_RATING = "MissingIMDBRating"
+ISSUE_PERSON_NAME_IMDB_MISMATCH = "PersonNameIMDBMismatch"
 
 MANAGED_ISSUES = {
     ISSUE_MISSING_IMDB,
@@ -56,6 +63,7 @@ MANAGED_ISSUES = {
     ISSUE_IMDB_TITLE_MISMATCH,
     ISSUE_MISSING_DOUBAN_RATING,
     ISSUE_MISSING_IMDB_RATING,
+    ISSUE_PERSON_NAME_IMDB_MISMATCH,
 }
 
 
@@ -233,6 +241,51 @@ def _normalize_person_imdb_id(imdb_id: Optional[str]) -> Optional[str]:
     if not re.match(r"^nm\d{7,8}$", candidate):
         return None
     return candidate
+
+
+def _should_check_person_name_mismatch(name: Optional[str]) -> bool:
+    text = str(name or "").strip()
+    if not text:
+        return False
+    if "·" in text:
+        return True
+    # 仅对外文/混合名称做IMDb一致性比对，避免中文名误报且大幅降低远程请求量。
+    return _has_latin(text)
+
+
+def _normalize_ascii_name_key(text: Optional[str]) -> str:
+    value = html.unescape(str(text or "")).strip().lower()
+    return re.sub(r"[^a-z0-9]+", "", value)
+
+
+def _is_person_name_consistent_with_imdb(local_name: Optional[str], imdb_name: Optional[str]) -> bool:
+    if not local_name or not imdb_name:
+        return True
+    local = html.unescape(str(local_name)).strip()
+    imdb_canonical = html.unescape(str(imdb_name)).strip()
+    if not local or not imdb_canonical:
+        return True
+    if local == imdb_canonical:
+        return True
+
+    # 中点音译（如“范·迪塞尔”）统一视为外文名错误。
+    if "·" in local:
+        return False
+
+    local_key = _normalize_ascii_name_key(local)
+    imdb_key = _normalize_ascii_name_key(imdb_canonical)
+    if local_key and imdb_key:
+        if local_key in imdb_key or imdb_key in local_key:
+            return True
+        local_words = set(re.findall(r"[a-z0-9]+", local.lower()))
+        imdb_words = set(re.findall(r"[a-z0-9]+", imdb_canonical.lower()))
+        overlap = local_words & imdb_words
+        if local_words and (len(overlap) / len(local_words)) >= 0.6:
+            return True
+        return False
+
+    # 中文名与IMDb英文名无法可靠自动比对，避免误报。
+    return True
 
 
 def _is_valid_image_url(url: Optional[str], check_remote: bool) -> bool:
@@ -463,6 +516,7 @@ def _audit_people_common(
     db_id: Optional[str],
     label: str,
     check_remote: bool,
+    enable_person_name_mismatch: bool = False,
     limit: int = 0,
 ) -> Tuple[int, int]:
     if not db_id:
@@ -491,6 +545,12 @@ def _audit_people_common(
 
         if imdb_raw and not _normalize_person_imdb_id(imdb_raw):
             issues.add(ISSUE_INVALID_IMDB)
+        imdb_norm = _normalize_person_imdb_id(imdb_raw)
+        if enable_person_name_mismatch and imdb_norm and _should_check_person_name_mismatch(name):
+            person_info = get_imdb_person_info(imdb_norm) or {}
+            imdb_name = person_info.get("name")
+            if not _is_person_name_consistent_with_imdb(name, imdb_name):
+                issues.add(ISSUE_PERSON_NAME_IMDB_MISMATCH)
 
         prop_photo = _get_files_url(page, "Photo")
         icon_url = _get_icon_url(page)
@@ -523,16 +583,28 @@ def _audit_people_common(
     return checked, changed
 
 
-def audit_actor(nh: NotionHelper, check_remote: bool, limit: int = 0) -> Tuple[int, int]:
-    return _audit_people_common(nh, nh.actor_database_id, "Actor", check_remote, limit)
+def audit_actor(
+    nh: NotionHelper, check_remote: bool, enable_person_name_mismatch: bool = False, limit: int = 0
+) -> Tuple[int, int]:
+    return _audit_people_common(
+        nh, nh.actor_database_id, "Actor", check_remote, enable_person_name_mismatch, limit
+    )
 
 
-def audit_director(nh: NotionHelper, check_remote: bool, limit: int = 0) -> Tuple[int, int]:
-    return _audit_people_common(nh, nh.director_database_id, "Director", check_remote, limit)
+def audit_director(
+    nh: NotionHelper, check_remote: bool, enable_person_name_mismatch: bool = False, limit: int = 0
+) -> Tuple[int, int]:
+    return _audit_people_common(
+        nh, nh.director_database_id, "Director", check_remote, enable_person_name_mismatch, limit
+    )
 
 
-def audit_author(nh: NotionHelper, check_remote: bool, limit: int = 0) -> Tuple[int, int]:
-    return _audit_people_common(nh, nh.author_database_id, "Author", check_remote, limit)
+def audit_author(
+    nh: NotionHelper, check_remote: bool, enable_person_name_mismatch: bool = False, limit: int = 0
+) -> Tuple[int, int]:
+    return _audit_people_common(
+        nh, nh.author_database_id, "Author", check_remote, enable_person_name_mismatch, limit
+    )
 
 
 def audit_book(nh: NotionHelper, check_remote: bool, limit: int = 0) -> Tuple[int, int]:
@@ -612,8 +684,12 @@ def run(
     check_remote: bool,
     limit: int = 0,
     enable_imdb_title_mismatch: bool = False,
+    enable_person_name_mismatch: bool = False,
 ) -> None:
-    _log(f"[Audit] scope={scope} check_remote={check_remote} limit={limit} mismatch_check={enable_imdb_title_mismatch}")
+    _log(
+        f"[Audit] scope={scope} check_remote={check_remote} limit={limit} "
+        f"mismatch_check={enable_imdb_title_mismatch} person_name_mismatch={enable_person_name_mismatch}"
+    )
     movie_helper = None
     book_helper = None
 
@@ -630,13 +706,28 @@ def run(
             enable_imdb_title_mismatch=enable_imdb_title_mismatch,
         )
     if scope in {"all", "actor"} and movie_helper:
-        audit_actor(movie_helper, check_remote=check_remote, limit=limit)
+        audit_actor(
+            movie_helper,
+            check_remote=check_remote,
+            enable_person_name_mismatch=enable_person_name_mismatch,
+            limit=limit,
+        )
     if scope in {"all", "director"} and movie_helper:
-        audit_director(movie_helper, check_remote=check_remote, limit=limit)
+        audit_director(
+            movie_helper,
+            check_remote=check_remote,
+            enable_person_name_mismatch=enable_person_name_mismatch,
+            limit=limit,
+        )
     if scope in {"all", "book"} and book_helper and book_helper.book_database_id:
         audit_book(book_helper, check_remote=check_remote, limit=limit)
     if scope in {"all", "author"} and book_helper:
-        audit_author(book_helper, check_remote=check_remote, limit=limit)
+        audit_author(
+            book_helper,
+            check_remote=check_remote,
+            enable_person_name_mismatch=enable_person_name_mismatch,
+            limit=limit,
+        )
 
 
 def main() -> None:
@@ -657,6 +748,11 @@ def main() -> None:
         action="store_true",
         help="启用 IMDb 标题一致性检测（可能产生误报，默认关闭）",
     )
+    parser.add_argument(
+        "--enable-person-name-mismatch",
+        action="store_true",
+        help="启用人物 Name 与 IMDb canonical 名称一致性检测（Actor/Director/Author）",
+    )
     parser.add_argument("--limit", type=int, default=0, help="仅审计前N条，0表示不限制")
     args = parser.parse_args()
 
@@ -665,6 +761,7 @@ def main() -> None:
         check_remote=not args.skip_url_check,
         limit=args.limit,
         enable_imdb_title_mismatch=args.enable_imdb_title_mismatch,
+        enable_person_name_mismatch=args.enable_person_name_mismatch,
     )
 
 
