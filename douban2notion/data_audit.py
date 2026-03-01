@@ -196,6 +196,12 @@ def _normalize_media_type(value: Optional[str]) -> str:
     return "movie"
 
 
+def _is_tv_season_page(props: Dict) -> bool:
+    medium = str(get_property_value(props.get("Medium") or {}) or "").strip().lower()
+    season = str(get_property_value(props.get("Season") or {}) or "").strip()
+    return bool(season) and (medium == "tv" or not medium)
+
+
 def _is_binding_still_plausible_via_search(
     current_imdb: str,
     name: Optional[str],
@@ -345,17 +351,18 @@ def audit_movie(
     director_name_map = _build_people_name_map(nh, nh.director_database_id)
 
     db_url_map: Dict[str, List[str]] = defaultdict(list)
-    imdb_map: Dict[str, List[str]] = defaultdict(list)
+    imdb_map: Dict[str, List[bool]] = defaultdict(list)
 
     for page in pages:
         props = page.get("properties") or {}
         db_url = get_property_value(props.get("DB_Url") or props.get("Url") or {})
         imdb_raw = _get_rich_text_value(page, "IMDB")
         imdb_norm = _normalize_movie_imdb_id(imdb_raw)
+        is_tv_season = _is_tv_season_page(props)
         if db_url:
             db_url_map[str(db_url).strip()].append(page.get("id"))
         if imdb_norm:
-            imdb_map[imdb_norm].append(page.get("id"))
+            imdb_map[imdb_norm].append(is_tv_season)
 
     changed = 0
     checked = 0
@@ -420,7 +427,9 @@ def audit_movie(
         if db_url and len(db_url_map.get(db_url) or []) > 1:
             issues.add(ISSUE_DUPLICATE_DB_URL)
         if imdb_norm and len(imdb_map.get(imdb_norm) or []) > 1:
-            issues.add(ISSUE_DUPLICATE_IMDB)
+            imdb_rows = imdb_map.get(imdb_norm) or []
+            if not all(imdb_rows):
+                issues.add(ISSUE_DUPLICATE_IMDB)
         if imdb_norm and enable_imdb_title_mismatch:
             imdb_info = get_imdb_info(imdb_norm) or {}
             imdb_title = imdb_info.get("title")

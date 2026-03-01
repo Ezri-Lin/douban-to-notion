@@ -273,6 +273,11 @@ def _has_rating_value(value):
         return False
 
 
+def _is_duplicate_imdb_issue_name(issue_name):
+    key = str(issue_name or "").strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+    return "duplicate" in key and "imdb" in key
+
+
 def _classify_data_issue_categories(issue_name):
     raw = str(issue_name or "").strip()
     if not raw:
@@ -457,6 +462,7 @@ def _build_light_movie_update_payload(movie):
         "Date",
         "Status",
         "DoubanRating",
+        "Medium",
         "Year",
         "Season",
         "Rating",
@@ -503,6 +509,7 @@ def insert_movie(
             "Name": movie.get("Name"),
             "MovieName": movie.get("MovieName"),
             "DoubanRating": movie.get("DoubanRating"),
+            "Medium": movie.get("Medium"),
             "Year": movie.get("Year"),
             "Season": movie.get("Season"),
             "Cover": movie.get("Cover"),
@@ -513,9 +520,14 @@ def insert_movie(
         }
         if db_url:
             notion_movie_duplicates.setdefault(db_url, []).append(current_movie)
-        if current_movie.get("IMDB"):
+        if current_movie.get("IMDB") and not _is_tv_season_entry(current_movie.get("Medium"), current_movie.get("Season")):
             notion_movie_imdb_dict[current_movie.get("IMDB")] = current_movie
-        for unique_key in _build_movie_unique_keys(current_movie.get("Name"), current_movie.get("MovieName"), current_movie.get("Year")):
+        for unique_key in _build_movie_unique_keys(
+            current_movie.get("Name"),
+            current_movie.get("MovieName"),
+            current_movie.get("Year"),
+            current_movie.get("Season"),
+        ):
             notion_movie_title_year_dict[unique_key] = current_movie
     for db_url, records in notion_movie_duplicates.items():
         preferred = _choose_preferred_movie_record(records)
@@ -575,6 +587,7 @@ def insert_movie(
         movie["DB_Url"] = db_url
         movie["Status"] = movie_status.get(result.get("status"))
         movie["DoubanRating"] = subject.get("rating", {}).get("value", 0) if subject.get("rating") else 0
+        movie["Medium"] = subject.get("type")
         movie["Year"] = subject.get("year")
 
         if result.get("rating"):
@@ -603,6 +616,13 @@ def insert_movie(
             original_title = movie.get("_original_title")
             alias_titles = movie.get("_alias_titles") or []
             data_issue_names = _normalize_data_issue_names(notion_movive.get("DataIssue"))
+            is_tv_season_row = _is_tv_season_entry(subtype, movie.get("Season"))
+            cleared_duplicate_imdb_issue = False
+            if is_tv_season_row and data_issue_names:
+                cleaned_issue_names = [x for x in data_issue_names if not _is_duplicate_imdb_issue_name(x)]
+                if cleaned_issue_names != data_issue_names:
+                    data_issue_names = cleaned_issue_names
+                    cleared_duplicate_imdb_issue = True
             has_data_issue = bool(data_issue_names)
             repair_flags, issue_categories_map = _derive_repair_flags(data_issue_names)
             basic_changed = (
@@ -611,14 +631,26 @@ def insert_movie(
                 or notion_movive.get("Status") != movie.get("Status")
                 or notion_movive.get("Rating") != movie.get("Rating")
                 or notion_movive.get("DoubanRating") != movie.get("DoubanRating")
+                or notion_movive.get("Medium") != movie.get("Medium")
                 or notion_movive.get("Season") != movie.get("Season")
             )
 
             # Fast path: 默认仅同步豆瓣变更；只有存在 DataIssue 时才做深度修复。
             if not basic_changed and not has_data_issue:
+                if cleared_duplicate_imdb_issue:
+                    properties = utils.get_properties({"DataIssue": data_issue_names}, movie_properties_type_dict)
+                    if properties:
+                        print("  清理多季TV误报DataIssue: DuplicateIMDB")
+                        notion_helper.update_page(
+                            page_id=notion_movive.get("page_id"),
+                            properties=properties,
+                        )
+                        notion_movive["DataIssue"] = data_issue_names
                 continue
             if basic_changed and not has_data_issue:
                 light_payload = _build_light_movie_update_payload(movie)
+                if cleared_duplicate_imdb_issue:
+                    light_payload["DataIssue"] = data_issue_names
                 if light_payload:
                     properties = utils.get_properties(light_payload, movie_properties_type_dict)
                     if properties:
@@ -1060,6 +1092,7 @@ def insert_movie(
                     ),
                     "Name": movie.get("Name", notion_movive.get("Name")),
                     "MovieName": movie.get("MovieName", notion_movive.get("MovieName")),
+                    "Medium": movie.get("Medium", notion_movive.get("Medium")),
                     "Year": movie.get("Year", notion_movive.get("Year")),
                     "Season": movie.get("Season", notion_movive.get("Season")),
                     "Cover": movie.get("Cover", notion_movive.get("Cover")),
@@ -1067,10 +1100,15 @@ def insert_movie(
                     "CoverStatus": movie.get("CoverStatus", notion_movive.get("CoverStatus")),
                     "DataIssue": movie.get("DataIssue", notion_movive.get("DataIssue")),
                 })
-                if notion_movive.get("IMDB"):
+                if notion_movive.get("IMDB") and not _is_tv_season_entry(
+                    notion_movive.get("Medium"), notion_movive.get("Season")
+                ):
                     notion_movie_imdb_dict[notion_movive.get("IMDB")] = notion_movive
                 for unique_key in _build_movie_unique_keys(
-                    notion_movive.get("Name"), notion_movive.get("MovieName"), notion_movive.get("Year")
+                    notion_movive.get("Name"),
+                    notion_movive.get("MovieName"),
+                    notion_movive.get("Year"),
+                    notion_movive.get("Season"),
                 ):
                     notion_movie_title_year_dict[unique_key] = notion_movive
 
@@ -1410,10 +1448,16 @@ def insert_movie(
             notion_helper.get_date_relation(properties,create_time)
 
             duplicate_movie = None
-            if movie.get("IMDB"):
+            is_tv_season_row = _is_tv_season_entry(subtype, movie.get("Season"))
+            if movie.get("IMDB") and not is_tv_season_row:
                 duplicate_movie = notion_movie_imdb_dict.get(movie.get("IMDB"))
             if not duplicate_movie:
-                for unique_key in _build_movie_unique_keys(movie.get("Name"), movie.get("MovieName"), movie.get("Year")):
+                for unique_key in _build_movie_unique_keys(
+                    movie.get("Name"),
+                    movie.get("MovieName"),
+                    movie.get("Year"),
+                    movie.get("Season"),
+                ):
                     duplicate_movie = notion_movie_title_year_dict.get(unique_key)
                     if duplicate_movie:
                         break
@@ -1446,6 +1490,7 @@ def insert_movie(
                 "IMDB_Url": movie.get("IMDB_Url"),
                 "Name": movie.get("Name"),
                 "MovieName": movie.get("MovieName"),
+                "Medium": movie.get("Medium"),
                 "Year": movie.get("Year"),
                 "Season": movie.get("Season"),
                 "Cover": movie.get("Cover"),
@@ -1454,9 +1499,16 @@ def insert_movie(
                 "page_id": (created_page or {}).get("id"),
             }
             notion_movie_dict[movie.get("DB_Url")] = created_movie
-            if created_movie.get("IMDB"):
+            if created_movie.get("IMDB") and not _is_tv_season_entry(
+                created_movie.get("Medium"), created_movie.get("Season")
+            ):
                 notion_movie_imdb_dict[created_movie.get("IMDB")] = created_movie
-            for unique_key in _build_movie_unique_keys(created_movie.get("Name"), created_movie.get("MovieName"), created_movie.get("Year")):
+            for unique_key in _build_movie_unique_keys(
+                created_movie.get("Name"),
+                created_movie.get("MovieName"),
+                created_movie.get("Year"),
+                created_movie.get("Season"),
+            ):
                 notion_movie_title_year_dict[unique_key] = created_movie
 
 def get_imdb(link):
@@ -1834,14 +1886,20 @@ def _should_try_tmdb_fallback(is_chinese, countries=None, original_title=None, d
     return False
 
 
-def _build_movie_unique_keys(name, movie_name, year):
+def _build_movie_unique_keys(name, movie_name, year, season=None):
     keys = []
     year_text = str(year or "").strip()
+    season_text = str(season or "").strip()
     for candidate in (name, movie_name):
         title_key = _normalize_title_key(candidate)
         if not title_key:
             continue
-        keys.append(f"{title_key}|{year_text}" if year_text else title_key)
+        if year_text and season_text:
+            keys.append(f"{title_key}|{year_text}|{season_text}")
+        elif year_text:
+            keys.append(f"{title_key}|{year_text}")
+        else:
+            keys.append(title_key)
     # 去重并保持顺序
     seen = set()
     result = []
@@ -1851,6 +1909,12 @@ def _build_movie_unique_keys(name, movie_name, year):
         seen.add(key)
         result.append(key)
     return result
+
+
+def _is_tv_season_entry(medium_or_subtype, season):
+    medium = str(medium_or_subtype or "").strip().lower()
+    season_text = str(season or "").strip()
+    return bool(season_text) and (medium == "tv" or not medium)
 
 
 def _movie_record_quality(record):
