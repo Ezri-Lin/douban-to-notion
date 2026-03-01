@@ -484,12 +484,24 @@ def insert_movie(
     existing_only=False,
     dedupe_duplicates=False,
     dedupe_only=False,
+    dry_run=False,
 ):
     notion_movies = notion_helper.query_all(database_id=notion_helper.movie_database_id)
     notion_movie_dict = {}
     notion_movie_duplicates = {}
     notion_movie_imdb_dict = {}
     notion_movie_title_year_dict = {}
+    sync_stats = {
+        "processed": 0,
+        "matched_existing": 0,
+        "pending_light_update": 0,
+        "pending_deep_repair": 0,
+        "pending_issue_cleanup": 0,
+        "pending_create": 0,
+        "skipped_unchanged": 0,
+        "skipped_existing_only": 0,
+        "dedupe_candidates": 0,
+    }
     for i in notion_movies:
         movie = {}
         for key, value in i.get("properties").items():
@@ -534,15 +546,23 @@ def insert_movie(
         if preferred:
             notion_movie_dict[db_url] = preferred
     if dedupe_duplicates:
-        archived_count = _archive_duplicate_movie_pages(notion_helper, notion_movie_duplicates)
+        sync_stats["dedupe_candidates"] = sum(max(0, len(rows) - 1) for rows in notion_movie_duplicates.values())
+        if dry_run:
+            print(f"[dry-run] 重复页待归档: {sync_stats['dedupe_candidates']}")
+            archived_count = 0
+        else:
+            archived_count = _archive_duplicate_movie_pages(notion_helper, notion_movie_duplicates)
         compacted_duplicates = {}
         for db_url, records in notion_movie_duplicates.items():
             preferred = _choose_preferred_movie_record(records)
             if preferred:
                 compacted_duplicates[db_url] = [preferred]
         notion_movie_duplicates = compacted_duplicates
-        print(f"重复页归档完成: {archived_count}")
+        if not dry_run:
+            print(f"重复页归档完成: {archived_count}")
         if dedupe_only:
+            if dry_run:
+                print("[dry-run] 去重预估完成（未执行写入）")
             return
     results = []
     for i in movie_status.keys():
@@ -563,6 +583,7 @@ def insert_movie(
         if limit and processed_count >= limit:
             break
         processed_count += 1
+        sync_stats["processed"] += 1
 
         # 验证必要字段
         if not douban_title or douban_title == "未知电影":
@@ -609,6 +630,7 @@ def insert_movie(
                 print(f"  Season选项不存在，跳过写入: {season_label}（请先在Notion手动添加该Select选项）")
         if notion_movie_dict.get(movie.get("DB_Url")):
             notion_movive = notion_movie_dict.get(movie.get("DB_Url"))
+            sync_stats["matched_existing"] += 1
             subtype = subject.get("subtype", "movie")
 
             douban_title = movie.get("_douban_title")
@@ -638,6 +660,9 @@ def insert_movie(
             # Fast path: 默认仅同步豆瓣变更；只有存在 DataIssue 时才做深度修复。
             if not basic_changed and not has_data_issue:
                 if cleared_duplicate_imdb_issue:
+                    sync_stats["pending_issue_cleanup"] += 1
+                    if dry_run:
+                        continue
                     properties = utils.get_properties({"DataIssue": data_issue_names}, movie_properties_type_dict)
                     if properties:
                         print("  清理多季TV误报DataIssue: DuplicateIMDB")
@@ -646,8 +671,13 @@ def insert_movie(
                             properties=properties,
                         )
                         notion_movive["DataIssue"] = data_issue_names
+                else:
+                    sync_stats["skipped_unchanged"] += 1
                 continue
             if basic_changed and not has_data_issue:
+                sync_stats["pending_light_update"] += 1
+                if dry_run:
+                    continue
                 light_payload = _build_light_movie_update_payload(movie)
                 if cleared_duplicate_imdb_issue:
                     light_payload["DataIssue"] = data_issue_names
@@ -663,6 +693,9 @@ def insert_movie(
                         notion_movive.update(light_payload)
                 continue
             if has_data_issue:
+                sync_stats["pending_deep_repair"] += 1
+                if dry_run:
+                    continue
                 print(f"  DataIssue触发修复: {', '.join(data_issue_names)}")
 
             # ── 获取 IMDB 信息 ──────────────────────────────────────
@@ -1114,6 +1147,10 @@ def insert_movie(
 
         else:
             if existing_only:
+                sync_stats["skipped_existing_only"] += 1
+                continue
+            sync_stats["pending_create"] += 1
+            if dry_run:
                 continue
             douban_title = movie.get("_douban_title")
             is_chinese = movie.get("_is_chinese")
@@ -1510,6 +1547,17 @@ def insert_movie(
                 created_movie.get("Season"),
             ):
                 notion_movie_title_year_dict[unique_key] = created_movie
+
+    if dry_run:
+        print("[dry-run] 预估结果（未执行写入）")
+        print(f"  扫描条目: {sync_stats['processed']}")
+        print(f"  已存在匹配: {sync_stats['matched_existing']}")
+        print(f"  待轻量更新: {sync_stats['pending_light_update']}")
+        print(f"  待深度修复: {sync_stats['pending_deep_repair']}")
+        print(f"  待清理误标(DataIssue): {sync_stats['pending_issue_cleanup']}")
+        print(f"  待新建: {sync_stats['pending_create']}")
+        print(f"  跳过(无变化): {sync_stats['skipped_unchanged']}")
+        print(f"  跳过(existing-only): {sync_stats['skipped_existing_only']}")
 
 def get_imdb(link):
     """从豆瓣页面获取IMDB编号（豆瓣已不再显示IMDB信息）"""
@@ -3342,6 +3390,7 @@ def main():
     parser.add_argument("--existing-only", action="store_true", help="仅更新Notion中已存在条目，不新增页面")
     parser.add_argument("--dedupe-duplicates", action="store_true", help="按DB_Url归档重复电影页面，只保留最佳条目")
     parser.add_argument("--dedupe-only", action="store_true", help="仅执行重复页归档，不拉取豆瓣数据")
+    parser.add_argument("--dry-run", action="store_true", help="仅预估待更新数量，不写入Notion")
     options = parser.parse_args()
     type = options.type
     if options.dedupe_only:
@@ -3359,6 +3408,7 @@ def main():
             existing_only=options.existing_only,
             dedupe_duplicates=options.dedupe_duplicates,
             dedupe_only=options.dedupe_only,
+            dry_run=options.dry_run,
         )
     else:
         insert_book(douban_name,notion_helper)
