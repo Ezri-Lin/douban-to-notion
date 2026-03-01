@@ -33,6 +33,8 @@ ISSUE_FOREIGN_DIRECTOR_CHINESE = "ForeignDirectorChinese"
 ISSUE_DUPLICATE_DB_URL = "DuplicateDBUrl"
 ISSUE_DUPLICATE_IMDB = "DuplicateIMDB"
 ISSUE_IMDB_TITLE_MISMATCH = "IMDBTitleMismatch"
+ISSUE_MISSING_DOUBAN_RATING = "MissingDoubanRating"
+ISSUE_MISSING_IMDB_RATING = "MissingIMDBRating"
 
 MANAGED_ISSUES = {
     ISSUE_MISSING_IMDB,
@@ -52,6 +54,8 @@ MANAGED_ISSUES = {
     ISSUE_DUPLICATE_DB_URL,
     ISSUE_DUPLICATE_IMDB,
     ISSUE_IMDB_TITLE_MISMATCH,
+    ISSUE_MISSING_DOUBAN_RATING,
+    ISSUE_MISSING_IMDB_RATING,
 }
 
 
@@ -139,6 +143,15 @@ def _normalize_movie_imdb_id(imdb_id: Optional[str]) -> Optional[str]:
     if not re.match(r"^tt\d{7,8}$", candidate):
         return None
     return candidate
+
+
+def _has_rating_value(value) -> bool:
+    if value is None:
+        return False
+    try:
+        return float(value) > 0
+    except Exception:
+        return False
 
 
 def _is_imdb_binding_consistent(name: Optional[str], movie_name: Optional[str], imdb_title: Optional[str]) -> bool:
@@ -356,6 +369,8 @@ def audit_movie(
         movie_name = _get_rich_text_value(page, "MovieName")
         imdb_raw = _get_rich_text_value(page, "IMDB")
         imdb_norm = _normalize_movie_imdb_id(imdb_raw)
+        douban_rating = get_property_value(props.get("DoubanRating") or {})
+        imdb_rating = get_property_value(props.get("IMDBRating") or {})
         actor_ids = _get_relation_ids(page, "Actor")
         director_ids = _get_relation_ids(page, "Director")
         year_value = get_property_value(props.get("Year") or {})
@@ -372,6 +387,10 @@ def audit_movie(
             issues.add(ISSUE_MISSING_IMDB)
         elif not imdb_norm:
             issues.add(ISSUE_INVALID_IMDB)
+        if not _has_rating_value(douban_rating):
+            issues.add(ISSUE_MISSING_DOUBAN_RATING)
+        if imdb_norm and not _has_rating_value(imdb_rating):
+            issues.add(ISSUE_MISSING_IMDB_RATING)
 
         if not actor_ids:
             issues.add(ISSUE_MISSING_ACTOR)

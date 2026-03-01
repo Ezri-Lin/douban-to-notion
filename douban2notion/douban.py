@@ -264,6 +264,15 @@ def _normalize_data_issue_names(value):
     return names
 
 
+def _has_rating_value(value):
+    if value is None:
+        return False
+    try:
+        return float(value) > 0
+    except Exception:
+        return False
+
+
 def _classify_data_issue_categories(issue_name):
     raw = str(issue_name or "").strip()
     if not raw:
@@ -271,8 +280,23 @@ def _classify_data_issue_categories(issue_name):
     key = raw.lower().replace("_", "").replace("-", "").replace(" ", "")
     categories = set()
 
-    if any(token in key for token in ["imdb", "imdbid"]):
+    is_imdb_rating_issue = "imdbrating" in key or "imdbrate" in key
+    if any(token in key for token in ["imdb", "imdbid"]) and not is_imdb_rating_issue:
         categories.add("imdb")
+    if any(
+        token in key
+        for token in [
+            "rating",
+            "score",
+            "评分",
+            "分数",
+            "doubanrating",
+            "imdbrating",
+            "豆瓣评分",
+            "imdb评分",
+        ]
+    ):
+        categories.add("rating")
     if any(token in key for token in ["cover", "poster", "海报", "封面", "剧照"]):
         categories.add("cover")
     if any(
@@ -306,7 +330,7 @@ def _classify_data_issue_categories(issue_name):
 
 def _derive_repair_flags(data_issue_names):
     issue_names = _normalize_data_issue_names(data_issue_names)
-    flags = {"all": False, "imdb": False, "cover": False, "people": False, "title": False}
+    flags = {"all": False, "imdb": False, "cover": False, "people": False, "title": False, "rating": False}
     issue_categories_map = {}
     has_known = False
     for name in issue_names:
@@ -323,12 +347,15 @@ def _derive_repair_flags(data_issue_names):
             flags["title"] = True
             flags["cover"] = True
             flags["people"] = True
+            flags["rating"] = True
         if "cover" in categories:
             flags["cover"] = True
         if "people" in categories:
             flags["people"] = True
         if "title" in categories:
             flags["title"] = True
+        if "rating" in categories:
+            flags["rating"] = True
         if "language" in categories:
             flags["title"] = True
             flags["people"] = True
@@ -343,6 +370,7 @@ def _derive_repair_flags(data_issue_names):
         flags["cover"] = True
         flags["people"] = True
         flags["title"] = True
+        flags["rating"] = True
     return flags, issue_categories_map
 
 
@@ -374,7 +402,7 @@ def _build_unresolved_data_issues(issue_names, issue_categories_map, final_state
 
         need_keep = False
         if "all" in categories:
-            categories = {"imdb", "cover", "people", "title"}
+            categories = {"imdb", "cover", "people", "title", "rating"}
 
         if "imdb" in categories and not final_state.get("imdb"):
             need_keep = True
@@ -410,6 +438,11 @@ def _build_unresolved_data_issues(issue_names, issue_categories_map, final_state
                     need_keep = True
                 if director_ids and _relation_names_are_chinese(notion_helper, director_ids):
                     need_keep = True
+        if "rating" in categories:
+            if not _has_rating_value(final_state.get("douban_rating")):
+                need_keep = True
+            if final_state.get("imdb") and not _has_rating_value(final_state.get("imdb_rating")):
+                need_keep = True
         if "duplicate" in categories:
             # 单条修复无法独立解决重复问题，保留标签等待去重任务处理。
             need_keep = True
@@ -466,8 +499,10 @@ def insert_movie(
             "Director": movie.get("Director"),
             "IMDB": movie.get("IMDB"),
             "IMDB_Url": movie.get("IMDB_Url"),
+            "IMDBRating": movie.get("IMDBRating"),
             "Name": movie.get("Name"),
             "MovieName": movie.get("MovieName"),
+            "DoubanRating": movie.get("DoubanRating"),
             "Year": movie.get("Year"),
             "Season": movie.get("Season"),
             "Cover": movie.get("Cover"),
@@ -575,6 +610,7 @@ def insert_movie(
                 or notion_movive.get("Remark") != movie.get("Remark")
                 or notion_movive.get("Status") != movie.get("Status")
                 or notion_movive.get("Rating") != movie.get("Rating")
+                or notion_movive.get("DoubanRating") != movie.get("DoubanRating")
                 or notion_movive.get("Season") != movie.get("Season")
             )
 
@@ -743,8 +779,8 @@ def insert_movie(
                             movie["Name"] = clean_douban_title
                     movie["MovieName"] = clean_douban_title
 
-            if repair_flags.get("imdb") and imdb_info and imdb_info.get('rating'):
-                movie["IMDBRating"] = imdb_info['rating']
+            if repair_flags.get("rating") and imdb_info and _has_rating_value(imdb_info.get("rating")):
+                movie["IMDBRating"] = imdb_info["rating"]
             if repair_flags.get("cover"):
                 resolved_cover, resolved_cover_source, resolved_cover_status = _resolve_cover_from_sources(
                     imdb_info,
@@ -924,6 +960,8 @@ def insert_movie(
             if has_data_issue:
                 final_state = {
                     "imdb": movie.get("IMDB", notion_movive.get("IMDB")),
+                    "imdb_rating": movie.get("IMDBRating", notion_movive.get("IMDBRating")),
+                    "douban_rating": movie.get("DoubanRating", notion_movive.get("DoubanRating")),
                     "cover": movie.get("Cover", notion_movive.get("Cover")),
                     "actor": movie.get("Actor", notion_movive.get("Actor")),
                     "director": movie.get("Director", notion_movive.get("Director")),
@@ -950,6 +988,7 @@ def insert_movie(
                 or ("CoverStatus" in movie and notion_movive.get("CoverStatus") != movie.get("CoverStatus"))
                 or ("IMDB" in movie and notion_movive.get("IMDB") != movie.get("IMDB"))
                 or ("IMDB_Url" in movie and notion_movive.get("IMDB_Url") != movie.get("IMDB_Url"))
+                or ("IMDBRating" in movie and notion_movive.get("IMDBRating") != movie.get("IMDBRating"))
                 or ("Actor" in movie and _normalize_relation_ids(notion_movive.get("Actor")) != _normalize_relation_ids(movie.get("Actor")))
                 or ("Director" in movie and _normalize_relation_ids(notion_movive.get("Director")) != _normalize_relation_ids(movie.get("Director")))
                 or (
@@ -1001,6 +1040,7 @@ def insert_movie(
                     "Status": movie.get("Status"),
                     "Date": movie.get("Date"),
                     "Rating": movie.get("Rating"),
+                    "DoubanRating": movie.get("DoubanRating", notion_movive.get("DoubanRating")),
                     "Actor": movie.get("Actor", notion_movive.get("Actor")),
                     "Director": movie.get("Director", notion_movive.get("Director")),
                     "IMDB": (
@@ -1012,6 +1052,11 @@ def insert_movie(
                         movie["IMDB_Url"]
                         if "IMDB_Url" in movie
                         else (None if clear_stale_imdb else notion_movive.get("IMDB_Url"))
+                    ),
+                    "IMDBRating": (
+                        movie["IMDBRating"]
+                        if "IMDBRating" in movie
+                        else (None if clear_stale_imdb else notion_movive.get("IMDBRating"))
                     ),
                     "Name": movie.get("Name", notion_movive.get("Name")),
                     "MovieName": movie.get("MovieName", notion_movive.get("MovieName")),
