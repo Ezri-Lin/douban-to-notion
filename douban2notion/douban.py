@@ -2436,6 +2436,7 @@ def _build_person_info_payload(person_id=None, c_name=None, photo=None, photo_so
         "photo_source": resolved_source,
         "nation": nation,
         "imdb_id": person_id,
+        "canonical_name": person_info_data.get("name"),
         "bio": person_info_data.get("bio"),
         "c_name": c_name,
     }

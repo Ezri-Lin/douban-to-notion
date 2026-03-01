@@ -485,6 +485,9 @@ def _audit_people_common(
 
         if not name:
             issues.add(ISSUE_MISSING_NAME)
+        if name and "·" in str(name):
+            # 外国人物使用中文音译中点名称（如“范·迪塞尔”）视为错误，后续应收敛到 IMDb 英文名。
+            issues.add(ISSUE_FOREIGN_NAME_CHINESE)
 
         if imdb_raw and not _normalize_person_imdb_id(imdb_raw):
             issues.add(ISSUE_INVALID_IMDB)

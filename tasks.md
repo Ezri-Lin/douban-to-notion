@@ -16,3 +16,4 @@
 - [x] 未识别 `DataIssue`：不再触发全量深修，也不自动删标签
 - [x] IMDb 抽取：移除页面任意 `tt` 号匹配，仅接受明确 IMDb 线索
 - [x] 人名标准化：写入前统一 `html.unescape`（修复 `O&apos;` 等实体）
+- [x] 人物名防错：Actor/Director `Name` 含 `·` 视为错误并在同步时优先回写 IMDb 英文名

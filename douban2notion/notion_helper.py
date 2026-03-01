@@ -382,11 +382,14 @@ class NotionHelper:
 
         # If this person is synced from IMDB and current Name is Chinese transliteration,
         # promote to the IMDB canonical English name to avoid mixed-language actor/director rows.
-        if preferred_name and "Name" in page_properties and imdb_id:
+        if "Name" in page_properties and imdb_id:
             current_title = page_properties["Name"].get("title", [])
             current_name = current_title[0].get("plain_text") if current_title else ""
-            if self._should_promote_person_name(current_name, preferred_name):
-                update_properties["Name"] = get_title(preferred_name)
+            canonical_name = person_info.get("canonical_name")
+            if self._should_promote_person_name(current_name, preferred_name, canonical_name=canonical_name):
+                target_name = canonical_name or preferred_name
+                if target_name:
+                    update_properties["Name"] = get_title(target_name)
 
         if update_properties:
             update_page_payload["properties"] = update_properties
@@ -401,13 +404,27 @@ class NotionHelper:
         return bool(text) and re.search(r"[A-Za-z]", str(text)) is not None
 
     @classmethod
-    def _should_promote_person_name(cls, current_name, preferred_name):
-        if not preferred_name or current_name == preferred_name:
+    def _should_promote_person_name(cls, current_name, preferred_name, canonical_name=None):
+        target_name = canonical_name or preferred_name
+        if not target_name or current_name == target_name:
             return False
-        # Prefer Chinese display names when a Chinese preferred_name is provided.
-        # This keeps Chinese-movie Actor/Director relations readable.
-        if cls._has_chinese(preferred_name):
+
+        # Keep Chinese names for local entries unless an IMDB canonical name is explicitly provided.
+        if cls._has_chinese(target_name):
             return not cls._has_chinese(current_name)
+
+        # Foreign person canonical name should replace Chinese transliterations like "范·迪塞尔".
+        if cls._has_latin(target_name) and not cls._has_chinese(target_name):
+            if "·" in str(current_name or ""):
+                return True
+            if (
+                preferred_name
+                and cls._has_latin(preferred_name)
+                and not cls._has_chinese(preferred_name)
+                and cls._has_chinese(current_name)
+                and not cls._has_latin(current_name)
+            ):
+                return True
         return False
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
