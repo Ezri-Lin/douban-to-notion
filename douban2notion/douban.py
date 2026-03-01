@@ -366,13 +366,11 @@ def _derive_repair_flags(data_issue_names):
     issue_names = _normalize_data_issue_names(data_issue_names)
     flags = {"all": False, "imdb": False, "cover": False, "people": False, "title": False, "rating": False}
     issue_categories_map = {}
-    has_known = False
     for name in issue_names:
         categories = _classify_data_issue_categories(name)
         issue_categories_map[name] = categories
         if "unknown" in categories and len(categories) == 1:
             continue
-        has_known = True
         if "all" in categories:
             flags["all"] = True
         if "imdb" in categories:
@@ -397,8 +395,6 @@ def _derive_repair_flags(data_issue_names):
             # 重复条目需要去重流程处理，不在单条深修中处理。
             pass
 
-    if issue_names and (flags["all"] or not has_known):
-        flags["all"] = True
     if flags["all"]:
         flags["imdb"] = True
         flags["cover"] = True
@@ -413,25 +409,8 @@ def _build_unresolved_data_issues(issue_names, issue_categories_map, final_state
     for issue_name in _normalize_data_issue_names(issue_names):
         categories = issue_categories_map.get(issue_name) or {"unknown"}
         if "unknown" in categories and len(categories) == 1:
-            name = str(final_state.get("name") or "").strip()
-            movie_name = str(final_state.get("movie_name") or "").strip()
-            actor_ids = final_state.get("actor") or []
-            director_ids = final_state.get("director") or []
-            is_complete = bool(
-                final_state.get("imdb")
-                and final_state.get("cover")
-                and name
-                and movie_name
-                and actor_ids
-                and director_ids
-            )
-            if is_complete:
-                if is_chinese and not _has_chinese(name):
-                    unresolved.append(issue_name)
-                elif (not is_chinese) and _has_chinese(name):
-                    unresolved.append(issue_name)
-            else:
-                unresolved.append(issue_name)
+            # 未识别标签不在自动修复阶段处理，保留给人工或专门规则。
+            unresolved.append(issue_name)
             continue
 
         need_keep = False
@@ -440,8 +419,10 @@ def _build_unresolved_data_issues(issue_names, issue_categories_map, final_state
 
         if "imdb" in categories and not final_state.get("imdb"):
             need_keep = True
-        if "cover" in categories and not final_state.get("cover"):
-            need_keep = True
+        if "cover" in categories:
+            cover_url = final_state.get("cover")
+            if not cover_url or not _is_valid_image_url(cover_url):
+                need_keep = True
         if "people" in categories:
             actor_ids = final_state.get("actor") or []
             director_ids = final_state.get("director") or []
@@ -676,6 +657,7 @@ def insert_movie(
                     cleared_duplicate_imdb_issue = True
             has_data_issue = bool(data_issue_names)
             repair_flags, issue_categories_map = _derive_repair_flags(data_issue_names)
+            has_repair_target = any(repair_flags.values())
             basic_changed = (
                 notion_movive.get("Date") != movie.get("Date")
                 or notion_movive.get("Remark") != movie.get("Remark")
@@ -687,7 +669,7 @@ def insert_movie(
             )
 
             # Fast path: 默认仅同步豆瓣变更；只有存在 DataIssue 时才做深度修复。
-            if not basic_changed and not has_data_issue:
+            if not basic_changed and (not has_data_issue or not has_repair_target):
                 if cleared_duplicate_imdb_issue:
                     sync_stats["pending_issue_cleanup"] += 1
                     if dry_run:
@@ -703,7 +685,7 @@ def insert_movie(
                 else:
                     sync_stats["skipped_unchanged"] += 1
                 continue
-            if basic_changed and not has_data_issue:
+            if basic_changed and (not has_data_issue or not has_repair_target):
                 sync_stats["pending_light_update"] += 1
                 if dry_run:
                     continue
@@ -721,7 +703,7 @@ def insert_movie(
                         )
                         notion_movive.update(light_payload)
                 continue
-            if has_data_issue:
+            if has_data_issue and has_repair_target:
                 sync_stats["pending_deep_repair"] += 1
                 if dry_run:
                     continue
@@ -907,7 +889,6 @@ def insert_movie(
                 movie["CoverStatus"] = resolved_cover_status
                 if resolved_cover_source:
                     movie["CoverSource"] = resolved_cover_source
-                movie["CoverCheckedAt"] = pendulum.now(tz=utils.tz).int_timestamp
 
             if repair_flags.get("people"):
                 cast_crew = None
@@ -922,7 +903,7 @@ def insert_movie(
                         actor_ids = []
                         douban_actors = subject.get("actors")[0:MAX_ACTORS_RELATION]
                         for idx, douban_actor in enumerate(douban_actors):
-                            actor_name = douban_actor.get("name")
+                            actor_name = _normalize_person_name(douban_actor.get("name"))
                             if not actor_name:
                                 continue
                             imdb_person_id = None
@@ -953,12 +934,18 @@ def insert_movie(
                         if actor_ids:
                             movie["Actor"] = actor_ids
                     elif not notion_movive.get("Actor") and subject.get("actors"):
-                        movie["Actor"] = [
-                            notion_helper.get_relation_id(
-                                x.get("name"), notion_helper.actor_database_id, USER_ICON_URL
+                        actor_ids = []
+                        for x in subject.get("actors")[0:MAX_ACTORS_RELATION]:
+                            actor_name = _normalize_person_name(x.get("name"))
+                            if not actor_name:
+                                continue
+                            actor_ids.append(
+                                notion_helper.get_relation_id(
+                                    actor_name, notion_helper.actor_database_id, USER_ICON_URL
+                                )
                             )
-                            for x in subject.get("actors")[0:MAX_ACTORS_RELATION]
-                        ]
+                        if actor_ids:
+                            movie["Actor"] = actor_ids
                 else:
                     if cast_crew and cast_crew['actors']:
                         actor_ids = []
@@ -1001,7 +988,7 @@ def insert_movie(
                         director_ids = []
                         douban_directors = subject.get("directors")[0:MAX_DIRECTORS_RELATION]
                         for idx, douban_director in enumerate(douban_directors):
-                            director_name = douban_director.get("name")
+                            director_name = _normalize_person_name(douban_director.get("name"))
                             if not director_name:
                                 continue
                             imdb_person_id = None
@@ -1032,12 +1019,18 @@ def insert_movie(
                         if director_ids:
                             movie["Director"] = director_ids
                     elif not notion_movive.get("Director") and subject.get("directors"):
-                        movie["Director"] = [
-                            notion_helper.get_relation_id(
-                                x.get("name"), notion_helper.director_database_id, USER_ICON_URL
+                        director_ids = []
+                        for x in subject.get("directors")[0:MAX_DIRECTORS_RELATION]:
+                            director_name = _normalize_person_name(x.get("name"))
+                            if not director_name:
+                                continue
+                            director_ids.append(
+                                notion_helper.get_relation_id(
+                                    director_name, notion_helper.director_database_id, USER_ICON_URL
+                                )
                             )
-                            for x in subject.get("directors")[0:MAX_DIRECTORS_RELATION]
-                        ]
+                        if director_ids:
+                            movie["Director"] = director_ids
                 else:
                     if cast_crew and cast_crew['directors']:
                         director_ids = []
@@ -1366,7 +1359,7 @@ def insert_movie(
                         actor_relations = []
                         douban_actors = subject.get("actors")[0:MAX_ACTORS_RELATION]
                         for idx, douban_actor in enumerate(douban_actors):
-                            actor_name = douban_actor.get("name")
+                            actor_name = _normalize_person_name(douban_actor.get("name"))
                             if not actor_name:
                                 continue
                             imdb_person_id = None
@@ -1404,7 +1397,7 @@ def insert_movie(
                         director_relations = []
                         douban_directors = subject.get("directors")[0:MAX_DIRECTORS_RELATION]
                         for idx, douban_director in enumerate(douban_directors):
-                            director_name = douban_director.get("name")
+                            director_name = _normalize_person_name(douban_director.get("name"))
                             if not director_name:
                                 continue
                             imdb_person_id = None
@@ -1440,21 +1433,32 @@ def insert_movie(
                 else:
                     print(f"  使用豆瓣数据源获取演员/导演")
                     if subject.get("actors"):
-                        actors = subject.get("actors")[0:MAX_ACTORS_RELATION]
-                        movie["Actor"] = [
-                            notion_helper.get_relation_id(
-                                x.get("name"), notion_helper.actor_database_id, USER_ICON_URL
+                        actor_relations = []
+                        for x in subject.get("actors")[0:MAX_ACTORS_RELATION]:
+                            actor_name = _normalize_person_name(x.get("name"))
+                            if not actor_name:
+                                continue
+                            actor_relations.append(
+                                notion_helper.get_relation_id(
+                                    actor_name, notion_helper.actor_database_id, USER_ICON_URL
+                                )
                             )
-                            for x in actors
-                        ]
+                        if actor_relations:
+                            movie["Actor"] = actor_relations
 
                     if subject.get("directors"):
-                        movie["Director"] = [
-                            notion_helper.get_relation_id(
-                                x.get("name"), notion_helper.director_database_id, USER_ICON_URL
+                        director_relations = []
+                        for x in subject.get("directors")[0:MAX_DIRECTORS_RELATION]:
+                            director_name = _normalize_person_name(x.get("name"))
+                            if not director_name:
+                                continue
+                            director_relations.append(
+                                notion_helper.get_relation_id(
+                                    director_name, notion_helper.director_database_id, USER_ICON_URL
+                                )
                             )
-                            for x in subject.get("directors")[0:MAX_DIRECTORS_RELATION]
-                        ]
+                        if director_relations:
+                            movie["Director"] = director_relations
             else:
                 # 外文电影：从IMDB获取Actor/Director，从豆瓣获取中文名
                 if imdb_id:
@@ -1633,14 +1637,6 @@ def get_imdb(link):
         response = requests.get(link, headers=headers, timeout=10)
         soup = _create_soup(response.content)
 
-        # 尝试从页面文本中查找IMDB编号
-        page_text = response.text
-        imdb_pattern = r'tt\d{7,8}'
-        import re
-        imdb_matches = re.findall(imdb_pattern, page_text)
-        if imdb_matches:
-            return imdb_matches[0]
-
         # 旧方法（可能不再有效）
         info = soup.find(id='info')
         if info:
@@ -1653,6 +1649,11 @@ def get_imdb(link):
         detail = parse_douban_detail_html(link, html_text=response.text, soup=soup)
         if detail.get("imdb"):
             return detail.get("imdb")
+
+        # 只接受明确指向 imdb.com/title 的链接，避免页面中无关 tt 号误命中。
+        link_imdb_id = _extract_imdb_id_from_html(response.text)
+        if link_imdb_id:
+            return link_imdb_id
     except Exception as e:
         print(f"  从豆瓣获取IMDB编号失败: {str(e)[:50]}")
     return None
@@ -1699,6 +1700,21 @@ def _douban_get_multiple_infos_list(infos_list, str_key, next_number):
     return [str(x).strip() for x in values if str(x).strip()]
 
 
+def _extract_imdb_id_from_html(html_text):
+    if not html_text:
+        return None
+    patterns = [
+        r"https?://(?:www\.)?imdb\.com/title/(tt\d{7,8})",
+        r"imdb\.com/title/(tt\d{7,8})",
+        r'"imdb"\s*:\s*"(tt\d{7,8})"',
+    ]
+    for pattern in patterns:
+        matched = re.search(pattern, html_text, flags=re.IGNORECASE)
+        if matched:
+            return matched.group(1)
+    return None
+
+
 def parse_douban_detail_html(link, html_text=None, soup=None):
     """
     从豆瓣详情页HTML提取字段（API失败时兜底）。
@@ -1735,9 +1751,7 @@ def parse_douban_detail_html(link, html_text=None, soup=None):
             result["languages"] = _douban_get_single_info_list(infos, "语言:")
 
         if not result["imdb"] and html_text:
-            matches = re.findall(r"tt\d{7,8}", html_text)
-            if matches:
-                result["imdb"] = matches[0]
+            result["imdb"] = _extract_imdb_id_from_html(html_text)
 
         year_tag = soup.select_one('#wrapper > div > h1 > span:last-of-type')
         if year_tag:
@@ -1932,6 +1946,13 @@ def _normalize_title_key(text):
     return normalized
 
 
+def _normalize_person_name(name):
+    text = html.unescape(str(name or "")).strip()
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text)
+
+
 def _normalize_imdb_id(imdb_id):
     candidate = (imdb_id or "").strip()
     if not re.match(r"^tt\d{7,8}$", candidate):
@@ -2068,7 +2089,7 @@ def _extract_alias_titles(subject):
 def _extract_people_names(people, limit):
     names = []
     for item in (people or []):
-        name = str((item or {}).get("name") or "").strip()
+        name = _normalize_person_name((item or {}).get("name"))
         if not name or name in names:
             continue
         names.append(name)
@@ -2433,15 +2454,23 @@ def _resolve_movie_alias_for_chinese(clean_douban_title, clean_original_title, i
 def _resolve_cover_from_sources(imdb_info, subject, current_cover=None, tmdb_cover=None):
     """Prefer IMDb poster, then TMDB, then keep current cover, finally fallback to Douban cover."""
     poster = (imdb_info or {}).get("poster")
-    if poster:
+    if poster and _is_valid_image_url(poster):
         return poster, "IMDB", "Ok"
-    if tmdb_cover:
+    if tmdb_cover and _is_valid_image_url(tmdb_cover):
         return tmdb_cover, "TMDB", "Ok"
-    if current_cover:
+    if current_cover and _is_valid_image_url(current_cover):
         return current_cover, "Current", "Ok"
     douban_cover = ((subject or {}).get("pic") or {}).get("normal") or ((subject or {}).get("pic") or {}).get("large")
     if douban_cover:
-        return douban_cover, "Douban", "Ok"
+        candidates = [douban_cover]
+        webp_url = _to_webp_variant(douban_cover)
+        if webp_url != douban_cover:
+            candidates.append(webp_url)
+        resolved_douban_cover = _pick_first_valid_cover(candidates)
+        if resolved_douban_cover:
+            return resolved_douban_cover, "Douban", "Ok"
+    if current_cover:
+        return current_cover, "Current", "Broken"
     return None, None, "Missing"
 
 
@@ -2476,7 +2505,7 @@ def _ensure_actor_relations(actor_ids, subject, notion_helper, allow_douban_fall
     for actor in (subject.get("actors") or []):
         if len(actor_ids) >= MAX_ACTORS_RELATION:
             break
-        name = actor.get("name")
+        name = _normalize_person_name(actor.get("name"))
         if not name:
             continue
         rel_id = notion_helper.get_relation_id(name, notion_helper.actor_database_id, USER_ICON_URL)

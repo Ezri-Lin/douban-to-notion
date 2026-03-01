@@ -241,10 +241,11 @@ class NotionHelper:
         """获取或创建关系实体的ID（Actor/Director/Category 等）"""
         if properties is None:
             properties = {}
-        key = f"{id}{name}"
+        imdb_id = (person_info or {}).get("imdb_id")
+        cache_identity = imdb_id if imdb_id else name
+        key = f"{id}:{cache_identity}"
         if key in self.__cache:
             return self.__cache.get(key)
-        imdb_id = (person_info or {}).get("imdb_id")
         db_properties = (self.get_database_schema(id).get("properties") or {})
         title_property_name = self._get_title_property_name(db_properties)
 
