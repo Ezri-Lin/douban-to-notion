@@ -16,6 +16,7 @@ load_dotenv()
 URL_VALIDATION_CACHE = {}
 AUTHOR_NAME_CACHE = {}
 OPENLIB_AUTHOR_PHOTO_CACHE = {}
+DEFAULT_USER_ICON_URL = "https://www.notion.so/icons/user-circle-filled_gray.svg"
 
 
 def now_date_payload():
@@ -342,8 +343,29 @@ def validate_people_photos(nh: NotionHelper, db_id: str, label: str, imdb_enable
         valid_photo = is_valid_image_url(prop_photo) if has_photo_property else True
         valid_icon = is_valid_image_url(icon_url)
         valid_cover = is_valid_image_url(cover_url)
+        is_default_user_icon = bool(icon_url) and icon_url == DEFAULT_USER_ICON_URL
+
+        # 如果属性图片可用，但页面icon/cover丢失，直接用已有Photo回填，避免依赖IMDb再次抓取。
+        if has_photo_property and valid_photo and (not valid_icon or not valid_cover or is_default_user_icon) and prop_photo:
+            try:
+                update_page_media(
+                    nh.client,
+                    page_id,
+                    property_name="Photo",
+                    image_url=prop_photo,
+                    write_property=False,
+                )
+                source = get_property_value(((page.get("properties") or {}).get("PhotoSource") or {}))
+                update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", "Ok", source)
+                remove_data_issue_tags(nh.client, page, {"BrokenPhoto", "MissingPhoto"})
+                fixed += 1
+                continue
+            except Exception:
+                pass
+
         if valid_photo and valid_icon and valid_cover:
             update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", "Ok")
+            remove_data_issue_tags(nh.client, page, {"BrokenPhoto", "MissingPhoto"})
             continue
 
         new_photo = None
@@ -370,6 +392,7 @@ def validate_people_photos(nh: NotionHelper, db_id: str, label: str, imdb_enable
             )
             source = "IMDB" if imdb_enabled else "OpenLibrary"
             update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", "Ok", source)
+            remove_data_issue_tags(nh.client, page, {"BrokenPhoto", "MissingPhoto"})
             fixed += 1
         except Exception:
             continue

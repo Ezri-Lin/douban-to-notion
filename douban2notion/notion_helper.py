@@ -353,7 +353,7 @@ class NotionHelper:
         if photo_ok:
             icon_url = ((page.get("icon") or {}).get("external") or {}).get("url")
             cover_url = ((page.get("cover") or {}).get("external") or {}).get("url")
-            if (not icon_url) or (not self._is_valid_image_url(icon_url)):
+            if (not icon_url) or (icon_url == USER_ICON_URL) or (not self._is_valid_image_url(icon_url)):
                 update_page_payload["icon"] = get_icon(photo)
             if (not cover_url) or (not self._is_valid_image_url(cover_url)):
                 update_page_payload["cover"] = get_icon(photo)
