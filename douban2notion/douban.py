@@ -3453,12 +3453,25 @@ def get_goodreads_cover(title, author=None, isbn=None):
                     cover_img = soup.find('img', {'class': lambda x: x and 'bookCover' in str(x)})
                     if cover_img and cover_img.get('src'):
                         cover_url = cover_img['src']
-                        # Goodreads的图片URL优化
+                        srcset = cover_img.get("srcset") or ""
+                        srcset_urls = []
+                        for src_item in srcset.split(","):
+                            candidate = src_item.strip().split(" ")[0].strip()
+                            if candidate:
+                                srcset_urls.append(candidate)
                         if cover_url and 'nophoto' not in cover_url:
-                            # 替换为更大的图片尺寸
-                            cover_url = cover_url.replace('._SX98_', '._SX318_').replace('._SY160_', '')
-                            print(f"从Goodreads获取封面成功: {title}")
-                            return cover_url
+                            gr_candidates = []
+                            for candidate in srcset_urls + [cover_url]:
+                                if not candidate or "nophoto" in candidate:
+                                    continue
+                                upgraded = _upgrade_book_cover_url(candidate)
+                                if upgraded:
+                                    gr_candidates.append(upgraded)
+                                gr_candidates.append(candidate)
+                            final_cover = _pick_first_valid_cover(gr_candidates)
+                            if final_cover:
+                                print(f"从Goodreads获取封面成功: {title}")
+                                return final_cover
                 break
             except requests.exceptions.Timeout:
                 if attempt == 0:
@@ -3508,6 +3521,134 @@ def _pick_first_valid_cover(candidates):
     for candidate in candidates:
         if candidate and _is_valid_image_url(candidate):
             return candidate
+    return None
+
+
+def _normalize_isbn(isbn):
+    text = str(isbn or "").strip().upper()
+    if not text:
+        return ""
+    cleaned = re.sub(r"[^0-9X]", "", text)
+    if len(cleaned) in {10, 13}:
+        return cleaned
+    return ""
+
+
+def _isbn13_to_isbn10(isbn13):
+    normalized = _normalize_isbn(isbn13)
+    if len(normalized) != 13 or not normalized.startswith("978"):
+        return None
+    core = normalized[3:12]
+    total = 0
+    for idx, digit in enumerate(core):
+        total += (10 - idx) * int(digit)
+    remainder = 11 - (total % 11)
+    if remainder == 10:
+        checksum = "X"
+    elif remainder == 11:
+        checksum = "0"
+    else:
+        checksum = str(remainder)
+    return core + checksum
+
+
+def _upgrade_book_cover_url(url):
+    if not url:
+        return url
+    upgraded = str(url).strip()
+    upgraded = upgraded.replace("m.media-amazon.com", "images-na.ssl-images-amazon.com")
+    # Amazon / Goodreads 常见的缩略图参数，统一提升为高分辨率
+    upgraded = re.sub(r"\._[A-Z0-9,]+_\.", "._SL1500_.", upgraded)
+    upgraded = upgraded.replace("._SX98_", "._SL1500_")
+    upgraded = upgraded.replace("._SY160_", "._SL1500_")
+    upgraded = upgraded.replace("._SX318_", "._SL1500_")
+    upgraded = upgraded.replace("._UX100_", "._SL1500_")
+    return upgraded
+
+
+def get_amazon_cover(isbn=None, isbn13=None):
+    normalized_isbn = _normalize_isbn(isbn)
+    normalized_isbn13 = _normalize_isbn(isbn13)
+    isbn10 = None
+    if len(normalized_isbn) == 10:
+        isbn10 = normalized_isbn
+    elif len(normalized_isbn) == 13:
+        isbn10 = _isbn13_to_isbn10(normalized_isbn)
+    if not isbn10 and len(normalized_isbn13) == 13:
+        isbn10 = _isbn13_to_isbn10(normalized_isbn13)
+
+    asins = []
+    for candidate in [isbn10, normalized_isbn, normalized_isbn13]:
+        if candidate and candidate not in asins:
+            asins.append(candidate)
+    if not asins:
+        return None
+
+    candidates = []
+    for asin in asins:
+        candidates.extend(
+            [
+                f"https://images-na.ssl-images-amazon.com/images/P/{asin}.01.LZZZZZZZ.jpg",
+                f"https://images-na.ssl-images-amazon.com/images/P/{asin}.01._SCLZZZZZZZ_.jpg",
+                f"https://m.media-amazon.com/images/P/{asin}.01.LZZZZZZZ.jpg",
+            ]
+        )
+    return _pick_first_valid_cover(candidates)
+
+
+def _query_google_books_cover(query, max_results=3):
+    if not query:
+        return None
+    try:
+        response = requests.get(
+            "https://www.googleapis.com/books/v1/volumes",
+            params={"q": query, "maxResults": max_results},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15,
+        )
+        if response.status_code != 200:
+            return None
+        items = (response.json().get("items") or [])
+        for item in items:
+            image_links = ((item.get("volumeInfo") or {}).get("imageLinks") or {})
+            image_candidates = []
+            for key in ["extraLarge", "large", "medium", "small", "thumbnail", "smallThumbnail"]:
+                url = image_links.get(key)
+                if not url:
+                    continue
+                normalized_url = str(url).replace("http://", "https://")
+                normalized_url = re.sub(r"&zoom=\d+", "", normalized_url)
+                image_candidates.append(normalized_url)
+            best = _pick_first_valid_cover(image_candidates)
+            if best:
+                return best
+    except Exception:
+        return None
+    return None
+
+
+def get_google_books_cover(isbn=None, isbn13=None, title=None, author=None):
+    isbn_candidates = []
+    for raw in [isbn13, isbn]:
+        normalized = _normalize_isbn(raw)
+        if normalized:
+            isbn_candidates.append(normalized)
+
+    for candidate in isbn_candidates:
+        best = _query_google_books_cover(f"isbn:{candidate}", max_results=2)
+        if best:
+            return best
+
+    # ISBN 无法命中时，退化到标题+作者检索
+    clean_title = _normalize_person_name(title)
+    clean_author = _normalize_person_name(author)
+    if clean_title:
+        title_query = f"intitle:{clean_title}"
+        if clean_author:
+            title_query += f"+inauthor:{clean_author}"
+        best = _query_google_books_cover(title_query, max_results=5)
+        if best:
+            return best
     return None
 
 
@@ -3576,8 +3717,22 @@ def _get_openlibrary_author_photo(author_name):
 
 def _get_book_cover(subject, title):
     isbn = subject.get("isbn")
+    isbn13 = subject.get("isbn13")
     authors = subject.get("author") or []
     author_name = authors[0] if authors else None
+    amazon_cover = get_amazon_cover(isbn=isbn, isbn13=isbn13)
+    if amazon_cover:
+        print(f"从Amazon获取封面成功: {title}")
+        return amazon_cover, "Amazon"
+    google_books_cover = get_google_books_cover(
+        isbn=isbn,
+        isbn13=isbn13,
+        title=title,
+        author=author_name,
+    )
+    if google_books_cover:
+        print(f"从GoogleBooks获取封面成功: {title}")
+        return google_books_cover, "GoogleBooks"
     goodreads_cover = get_goodreads_cover(title, author=author_name, isbn=isbn)
     if _is_valid_image_url(goodreads_cover):
         return goodreads_cover, "Goodreads"
