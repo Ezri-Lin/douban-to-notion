@@ -3,6 +3,7 @@ import html
 import json
 import os
 import re
+from difflib import SequenceMatcher
 from bs4 import BeautifulSoup
 import pendulum
 from retrying import retry
@@ -3596,7 +3597,123 @@ def get_amazon_cover(isbn=None, isbn13=None):
     return _pick_first_valid_cover(candidates)
 
 
-def _query_google_books_cover(query, max_results=3):
+def _compact_book_key(text):
+    normalized = _normalize_title_key(text)
+    if not normalized:
+        return ""
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", normalized)
+
+
+def _normalize_author_match_key(name):
+    text = _normalize_person_name(name).lower()
+    if not text:
+        return ""
+    text = (
+        text.replace("’", "'")
+        .replace("‘", "'")
+        .replace("·", " ")
+        .replace("•", " ")
+        .replace("・", " ")
+    )
+    text = re.sub(r"[\s\.\-_/,:;，、；|()（）\[\]{}'\"`]+", "", text)
+    return text
+
+
+def _title_similarity_score(left, right):
+    left_normalized = _normalize_title_key(left)
+    right_normalized = _normalize_title_key(right)
+    if not left_normalized or not right_normalized:
+        return 0.0
+    if left_normalized == right_normalized:
+        return 1.0
+    left_compact = _compact_book_key(left_normalized)
+    right_compact = _compact_book_key(right_normalized)
+    compact_score = 0.0
+    if left_compact and right_compact:
+        if left_compact == right_compact:
+            return 0.98
+        compact_score = SequenceMatcher(None, left_compact, right_compact).ratio()
+    normal_score = SequenceMatcher(None, left_normalized, right_normalized).ratio()
+    return max(normal_score, compact_score)
+
+
+def _extract_google_book_identifiers(volume_info):
+    identifiers = set()
+    for item in (volume_info.get("industryIdentifiers") or []):
+        identifier = _normalize_isbn(item.get("identifier"))
+        if identifier:
+            identifiers.add(identifier)
+            if len(identifier) == 13:
+                isbn10 = _isbn13_to_isbn10(identifier)
+                if isbn10:
+                    identifiers.add(isbn10)
+    return identifiers
+
+
+def _score_google_book_item(item, expected_title=None, expected_author=None, expected_isbns=None):
+    volume_info = item.get("volumeInfo") or {}
+    candidate_title = volume_info.get("title") or ""
+    candidate_subtitle = volume_info.get("subtitle") or ""
+    full_title = f"{candidate_title} {candidate_subtitle}".strip()
+    candidate_authors = volume_info.get("authors") or []
+    candidate_ids = _extract_google_book_identifiers(volume_info)
+
+    expected_isbns = expected_isbns or set()
+    isbn_matched = bool(expected_isbns and (candidate_ids & expected_isbns))
+    title_similarity = _title_similarity_score(expected_title, candidate_title or full_title)
+    author_matched = False
+
+    score = 0
+    if expected_isbns:
+        if isbn_matched:
+            score += 120
+        elif candidate_ids:
+            score -= 35
+
+    if expected_title:
+        if title_similarity >= 0.98:
+            score += 80
+        elif title_similarity >= 0.90:
+            score += 60
+        elif title_similarity >= 0.80:
+            score += 40
+        elif title_similarity >= 0.70:
+            score += 25
+        elif title_similarity >= 0.60:
+            score += 10
+        else:
+            score -= 30
+
+    expected_author_key = _normalize_author_match_key(expected_author)
+    if expected_author_key and candidate_authors:
+        candidate_author_keys = [_normalize_author_match_key(x) for x in candidate_authors if x]
+        if any(key == expected_author_key for key in candidate_author_keys):
+            author_matched = True
+            score += 30
+        elif any(expected_author_key in key or key in expected_author_key for key in candidate_author_keys if key):
+            author_matched = True
+            score += 15
+        else:
+            score -= 12
+
+    return {
+        "score": score,
+        "title_similarity": title_similarity,
+        "isbn_matched": isbn_matched,
+        "author_matched": author_matched,
+        "title": candidate_title,
+    }
+
+
+def _query_google_books_cover(
+    query,
+    max_results=5,
+    expected_title=None,
+    expected_author=None,
+    expected_isbns=None,
+    strict_isbn=False,
+    min_score=20,
+):
     if not query:
         return None
     try:
@@ -3609,8 +3726,24 @@ def _query_google_books_cover(query, max_results=3):
         if response.status_code != 200:
             return None
         items = (response.json().get("items") or [])
+        scored_items = []
         for item in items:
-            image_links = ((item.get("volumeInfo") or {}).get("imageLinks") or {})
+            score_info = _score_google_book_item(
+                item,
+                expected_title=expected_title,
+                expected_author=expected_author,
+                expected_isbns=expected_isbns,
+            )
+            scored_items.append((score_info, item))
+        scored_items.sort(key=lambda x: x[0]["score"], reverse=True)
+
+        for score_info, item in scored_items:
+            if score_info["score"] < min_score:
+                continue
+            if strict_isbn and expected_isbns and not score_info["isbn_matched"]:
+                continue
+            volume_info = item.get("volumeInfo") or {}
+            image_links = volume_info.get("imageLinks") or {}
             image_candidates = []
             for key in ["extraLarge", "large", "medium", "small", "thumbnail", "smallThumbnail"]:
                 url = image_links.get(key)
@@ -3628,25 +3761,45 @@ def _query_google_books_cover(query, max_results=3):
 
 
 def get_google_books_cover(isbn=None, isbn13=None, title=None, author=None):
-    isbn_candidates = []
+    expected_isbns = set()
     for raw in [isbn13, isbn]:
         normalized = _normalize_isbn(raw)
         if normalized:
-            isbn_candidates.append(normalized)
+            expected_isbns.add(normalized)
+            if len(normalized) == 13:
+                isbn10 = _isbn13_to_isbn10(normalized)
+                if isbn10:
+                    expected_isbns.add(isbn10)
 
-    for candidate in isbn_candidates:
-        best = _query_google_books_cover(f"isbn:{candidate}", max_results=2)
+    for candidate in sorted(expected_isbns):
+        best = _query_google_books_cover(
+            f"isbn:{candidate}",
+            max_results=3,
+            expected_title=title,
+            expected_author=author,
+            expected_isbns=expected_isbns,
+            strict_isbn=True,
+            min_score=35,
+        )
         if best:
             return best
 
-    # ISBN 无法命中时，退化到标题+作者检索
+    # ISBN 无法命中时，退化到标题+作者检索，但要求更高匹配分，降低错封面概率
     clean_title = _normalize_person_name(title)
     clean_author = _normalize_person_name(author)
     if clean_title:
         title_query = f"intitle:{clean_title}"
         if clean_author:
             title_query += f"+inauthor:{clean_author}"
-        best = _query_google_books_cover(title_query, max_results=5)
+        best = _query_google_books_cover(
+            title_query,
+            max_results=8,
+            expected_title=clean_title,
+            expected_author=clean_author,
+            expected_isbns=expected_isbns,
+            strict_isbn=False,
+            min_score=48,
+        )
         if best:
             return best
     return None
@@ -3724,6 +3877,10 @@ def _get_book_cover(subject, title):
     if amazon_cover:
         print(f"从Amazon获取封面成功: {title}")
         return amazon_cover, "Amazon"
+    # Goodreads 封面在 Notion 中渲染稳定（通常可直接预览），优先于 GoogleBooks。
+    goodreads_cover = get_goodreads_cover(title, author=author_name, isbn=isbn)
+    if _is_valid_image_url(goodreads_cover):
+        return goodreads_cover, "Goodreads"
     google_books_cover = get_google_books_cover(
         isbn=isbn,
         isbn13=isbn13,
@@ -3733,9 +3890,6 @@ def _get_book_cover(subject, title):
     if google_books_cover:
         print(f"从GoogleBooks获取封面成功: {title}")
         return google_books_cover, "GoogleBooks"
-    goodreads_cover = get_goodreads_cover(title, author=author_name, isbn=isbn)
-    if _is_valid_image_url(goodreads_cover):
-        return goodreads_cover, "Goodreads"
     douban_cover = _get_douban_book_cover(subject)
     if douban_cover:
         return douban_cover, "Douban"
