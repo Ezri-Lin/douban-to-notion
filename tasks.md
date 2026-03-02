@@ -18,3 +18,15 @@
 - [x] 人名标准化：写入前统一 `html.unescape`（修复 `O&apos;` 等实体）
 - [x] 人物名防错：Actor/Director `Name` 含 `·` 视为错误并在同步时优先回写 IMDb 英文名
 - [x] 人物审计增强：新增 `PersonNameIMDBMismatch`，用于识别 Name 与 IMDb canonical 明显不一致
+
+## Book 改造任务（2026-03-02）
+
+- [x] Book：修复 `GD_Url` 空值导致的重复更新（仅在有值时比较/写入）
+- [x] Book：封面抓取失败且已有封面时保留旧 `Cover/CoverStatus/CoverSource`
+- [x] Book：同步任务不更新 `CoverCheckedAt`（仅审计更新）
+- [x] Book：`Year` 写入前自动确保 Select 选项存在，失败时跳过写入
+- [x] Book：CLI 支持 `--only-title/--only-db-url/--limit/--existing-only/--dedupe-duplicates/--dedupe-only/--dry-run`
+- [x] Book：按 `DB_Url` 支持重复页归档（可 dry-run）
+- [x] Book：增强出版社解析（支持 `,，/／、;；|` 分隔并去重）
+- [x] Author：新增作者名归一化与别名映射（`AUTHOR_NAME_ALIAS_JSON`）防止 `J.K. Rowling` 多版本
+- [x] 验证：`python3 -m compileall douban2notion` 通过

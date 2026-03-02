@@ -77,6 +77,7 @@ _SOUP_FALLBACK_NOTIFIED = False
 DEFAULT_IMDB_TITLE_ALIAS_MAP = {}
 DEFAULT_IMDB_OVERRIDE_MAP = {}
 DEFAULT_TMDB_ID_OVERRIDE_MAP = {}
+_AUTHOR_ALIAS_CACHE = None
 
 
 def _create_soup(content):
@@ -1953,6 +1954,71 @@ def _normalize_person_name(name):
     return re.sub(r"\s+", " ", text)
 
 
+def _normalize_author_key_base(name):
+    text = _normalize_person_name(name).lower()
+    if not text:
+        return ""
+    text = (
+        text.replace("’", "'")
+        .replace("‘", "'")
+        .replace("·", " ")
+        .replace("•", " ")
+        .replace("・", " ")
+        .replace("＆", "&")
+    )
+    text = re.sub(r"[\s\.\-_/,:;，、；|()（）\[\]{}'\"`]+", "", text)
+    text = re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", text)
+    return text
+
+
+def _get_author_alias_maps():
+    global _AUTHOR_ALIAS_CACHE
+    if _AUTHOR_ALIAS_CACHE is not None:
+        return _AUTHOR_ALIAS_CACHE
+    exact_map = {}
+    normalized_map = {}
+    raw = os.getenv("AUTHOR_NAME_ALIAS_JSON", "").strip()
+    if raw:
+        try:
+            custom = json.loads(raw)
+            if isinstance(custom, dict):
+                for key, value in custom.items():
+                    alias = _normalize_person_name(key)
+                    canonical = _normalize_person_name(value)
+                    if not alias or not canonical:
+                        continue
+                    exact_map[alias] = canonical
+                    exact_map[alias.lower()] = canonical
+                    alias_key = _normalize_author_key_base(alias)
+                    if alias_key:
+                        normalized_map[alias_key] = canonical
+        except Exception:
+            print("  AUTHOR_NAME_ALIAS_JSON 解析失败，忽略自定义作者别名")
+    _AUTHOR_ALIAS_CACHE = (exact_map, normalized_map)
+    return _AUTHOR_ALIAS_CACHE
+
+
+def _canonicalize_author_name(name):
+    normalized = _normalize_person_name(name)
+    if not normalized:
+        return ""
+    exact_map, normalized_map = _get_author_alias_maps()
+    if normalized in exact_map:
+        return exact_map[normalized]
+    lowered = normalized.lower()
+    if lowered in exact_map:
+        return exact_map[lowered]
+    normalized_key = _normalize_author_key_base(normalized)
+    if normalized_key and normalized_key in normalized_map:
+        return normalized_map[normalized_key]
+    return normalized
+
+
+def _normalize_author_match_key(name):
+    canonical = _canonicalize_author_name(name)
+    return _normalize_author_key_base(canonical)
+
+
 def _normalize_imdb_id(imdb_id):
     candidate = (imdb_id or "").strip()
     if not re.match(r"^tt\d{7,8}$", candidate):
@@ -3531,9 +3597,17 @@ def _extract_book_year(subject):
 
 def _extract_publisher_list(subject):
     press = []
+    seen = set()
     for item in subject.get("press") or []:
-        press.extend(x.strip() for x in str(item).split(",") if x.strip())
-    return press[0:MAX_PUBLISHERS_MULTI_SELECT]
+        for publisher in re.split(r"[,，/／、;；|]+", str(item)):
+            name = publisher.strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            press.append(name)
+            if len(press) >= MAX_PUBLISHERS_MULTI_SELECT:
+                return press
+    return press
 
 
 def _normalize_relation_ids(value):
@@ -3564,113 +3638,415 @@ def _normalize_multi_select_names(value):
     return sorted(names)
 
 
-def insert_book(douban_name, notion_helper):
+def _is_blank_value(value):
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    if isinstance(value, (list, tuple, dict, set)):
+        return len(value) == 0
+    return False
+
+
+def _is_missing_positive_number(value):
+    if value is None:
+        return True
+    try:
+        return float(value) <= 0
+    except Exception:
+        return False
+
+
+def _book_record_quality(record):
+    if not record:
+        return -1
+    score = 0
+    if record.get("ISBN_13") or record.get("ISBN"):
+        score += 4
+    if record.get("Author"):
+        score += 3
+    if record.get("Cover"):
+        score += 2
+    if not _is_missing_positive_number(record.get("DoubanRating")):
+        score += 2
+    if not _is_missing_positive_number(record.get("Raters")):
+        score += 1
+    if record.get("Intro"):
+        score += 1
+    if record.get("Publisher"):
+        score += 1
+    if record.get("Year"):
+        score += 1
+    return score
+
+
+def _choose_preferred_book_record(records):
+    if not records:
+        return None
+    best = None
+    best_score = -1
+    for item in records:
+        s = _book_record_quality(item)
+        if s > best_score:
+            best_score = s
+            best = item
+    return best
+
+
+def _archive_duplicate_book_pages(notion_helper, notion_book_duplicates):
+    archived_count = 0
+    for db_url, records in (notion_book_duplicates or {}).items():
+        if not db_url or len(records) <= 1:
+            continue
+        preferred = _choose_preferred_book_record(records)
+        preferred_page_id = (preferred or {}).get("page_id")
+        for record in records:
+            page_id = (record or {}).get("page_id")
+            if not page_id or page_id == preferred_page_id:
+                continue
+            notion_helper.archive_page(page_id)
+            archived_count += 1
+            print(f"归档重复图书条目: {db_url} -> {page_id}")
+    return archived_count
+
+
+def _author_record_quality(record):
+    if not record:
+        return -1
+    score = 0
+    if record.get("imdb"):
+        score += 6
+    if record.get("photo"):
+        score += 2
+    if record.get("c_name"):
+        score += 1
+    if record.get("name"):
+        score += 1
+    return score
+
+
+def _extract_page_title(page):
+    for value in (page.get("properties") or {}).values():
+        if (value or {}).get("type") == "title":
+            return utils.get_property_value(value)
+    return None
+
+
+def _build_author_lookup(notion_helper):
+    lookup = {}
+    if not notion_helper.author_database_id:
+        return lookup
+    authors = notion_helper.query_all(database_id=notion_helper.author_database_id)
+    for page in authors:
+        props = page.get("properties") or {}
+        name = _normalize_person_name(_extract_page_title(page))
+        c_name = _normalize_person_name(utils.get_property_value(props.get("C-Name") or {}))
+        imdb = _normalize_person_name(utils.get_property_value(props.get("IMDB") or {}))
+        photo = utils.get_property_value(props.get("Photo") or {})
+        record = {
+            "page_id": page.get("id"),
+            "name": name,
+            "c_name": c_name,
+            "imdb": imdb,
+            "photo": photo,
+        }
+        match_keys = set()
+        for candidate_name in [name, c_name]:
+            normalized_key = _normalize_author_match_key(candidate_name)
+            if normalized_key:
+                match_keys.add(normalized_key)
+            raw_key = _normalize_author_key_base(candidate_name)
+            if raw_key:
+                match_keys.add(raw_key)
+        if imdb:
+            match_keys.add(f"imdb:{imdb.lower()}")
+        for key in match_keys:
+            existing = lookup.get(key)
+            if (not existing) or (_author_record_quality(record) > _author_record_quality(existing)):
+                lookup[key] = record
+    return lookup
+
+
+def _resolve_author_relation_id(author_name, notion_helper, author_lookup):
+    if not notion_helper.author_database_id:
+        return None
+    raw_name = _normalize_person_name(author_name)
+    canonical_name = _canonicalize_author_name(raw_name)
+    if not canonical_name:
+        return None
+    match_keys = []
+    canonical_key = _normalize_author_match_key(canonical_name)
+    if canonical_key:
+        match_keys.append(canonical_key)
+    raw_key = _normalize_author_key_base(raw_name)
+    if raw_key and raw_key not in match_keys:
+        match_keys.append(raw_key)
+    for key in match_keys:
+        cached = author_lookup.get(key)
+        if cached and cached.get("page_id"):
+            return cached.get("page_id")
+
+    author_photo = _get_openlibrary_author_photo(canonical_name)
+    person_info = {"photo": author_photo, "photo_source": "OpenLibrary"} if author_photo else {"photo_source": "OpenLibrary"}
+    page_id = notion_helper.get_relation_id(
+        canonical_name,
+        notion_helper.author_database_id,
+        USER_ICON_URL,
+        {},
+        person_info,
+    )
+    record = {
+        "page_id": page_id,
+        "name": canonical_name,
+        "c_name": "",
+        "imdb": "",
+        "photo": author_photo,
+    }
+    for key in match_keys:
+        author_lookup[key] = record
+    canonical_raw_key = _normalize_author_key_base(canonical_name)
+    if canonical_raw_key:
+        author_lookup[canonical_raw_key] = record
+    return page_id
+
+
+def insert_book(
+    douban_name,
+    notion_helper,
+    only_titles=None,
+    only_db_urls=None,
+    limit=0,
+    existing_only=False,
+    dedupe_duplicates=False,
+    dedupe_only=False,
+    dry_run=False,
+):
     notion_books = notion_helper.query_all(database_id=notion_helper.book_database_id)
     notion_book_dict = {}
-    for i in notion_books:
-        book = {}
-        for key, value in i.get("properties").items():
-            book[key] = utils.get_property_value(value)
-        db_url = book.get("DB_Url") or book.get("Url")
-        notion_book_dict[db_url] = {
-            "Name": book.get("Name"),
-            "Remark": book.get("Remark"),
-            "Status": book.get("Status"),
-            "Date": book.get("Date"),
-            "Rating": book.get("Rating"),
-            "Cover": book.get("Cover"),
-            "CoverStatus": book.get("CoverStatus"),
-            "CoverSource": book.get("CoverSource"),
-            "CoverCheckedAt": book.get("CoverCheckedAt"),
-            "ISBN": book.get("ISBN"),
-            "ISBN_13": book.get("ISBN_13"),
-            "GD_Url": book.get("GD_Url"),
-            "Intro": book.get("Intro"),
-            "DoubanRating": book.get("DoubanRating"),
-            "Raters": book.get("Raters"),
-            "Year": book.get("Year"),
-            "Author": _normalize_relation_ids(book.get("Author")),
-            "Category": _normalize_relation_ids(book.get("Category")),
-            "Publisher": _normalize_multi_select_names(book.get("Publisher")),
-            "page_id": i.get("id"),
+    notion_book_duplicates = {}
+    sync_stats = {
+        "processed": 0,
+        "matched_existing": 0,
+        "pending_update": 0,
+        "pending_create": 0,
+        "skipped_unchanged": 0,
+        "skipped_existing_only": 0,
+        "dedupe_candidates": 0,
+    }
+    for page in notion_books:
+        raw_book = {}
+        for key, value in page.get("properties").items():
+            raw_book[key] = utils.get_property_value(value)
+        db_url = raw_book.get("DB_Url") or raw_book.get("Url")
+        current_book = {
+            "Name": raw_book.get("Name"),
+            "Remark": raw_book.get("Remark"),
+            "Status": raw_book.get("Status"),
+            "Date": raw_book.get("Date"),
+            "Rating": raw_book.get("Rating"),
+            "Cover": raw_book.get("Cover"),
+            "CoverStatus": raw_book.get("CoverStatus"),
+            "CoverSource": raw_book.get("CoverSource"),
+            "CoverCheckedAt": raw_book.get("CoverCheckedAt"),
+            "ISBN": raw_book.get("ISBN"),
+            "ISBN_13": raw_book.get("ISBN_13"),
+            "GD_Url": raw_book.get("GD_Url"),
+            "Intro": raw_book.get("Intro"),
+            "DoubanRating": raw_book.get("DoubanRating"),
+            "Raters": raw_book.get("Raters"),
+            "Year": raw_book.get("Year"),
+            "Author": _normalize_relation_ids(raw_book.get("Author")),
+            "Category": _normalize_relation_ids(raw_book.get("Category")),
+            "Publisher": _normalize_multi_select_names(raw_book.get("Publisher")),
+            "page_id": page.get("id"),
         }
+        if not db_url:
+            continue
+        notion_book_duplicates.setdefault(db_url, []).append(current_book)
+    for db_url, records in notion_book_duplicates.items():
+        preferred = _choose_preferred_book_record(records)
+        if preferred:
+            notion_book_dict[db_url] = preferred
+    if dedupe_duplicates:
+        sync_stats["dedupe_candidates"] = sum(max(0, len(rows) - 1) for rows in notion_book_duplicates.values())
+        if dry_run:
+            print(f"[dry-run] 图书重复页待归档: {sync_stats['dedupe_candidates']}")
+            archived_count = 0
+        else:
+            archived_count = _archive_duplicate_book_pages(notion_helper, notion_book_duplicates)
+        compacted_duplicates = {}
+        for db_url, records in notion_book_duplicates.items():
+            preferred = _choose_preferred_book_record(records)
+            if preferred:
+                compacted_duplicates[db_url] = [preferred]
+        notion_book_duplicates = compacted_duplicates
+        if not dry_run:
+            print(f"图书重复页归档完成: {archived_count}")
+        if dedupe_only:
+            if dry_run:
+                print("[dry-run] 图书去重预估完成（未执行写入）")
+            return
+
+    author_lookup = _build_author_lookup(notion_helper)
     print(f"notion {len(notion_book_dict)}")
     results = []
-    for i in book_status.keys():
-        results.extend(fetch_subjects(douban_name, "book", i))
+    for status_key in book_status.keys():
+        results.extend(fetch_subjects(douban_name, "book", status_key))
+    processed_count = 0
     for result in results:
         book = {}
         if not result:
             continue
-        subject = result.get("subject")
+        subject = result.get("subject") or {}
+        db_url = subject.get("url")
+        title = subject.get("title")
+        if not _match_title_filter(title, only_titles):
+            continue
+        if not _match_db_url_filter(db_url, only_db_urls):
+            continue
+        if limit and processed_count >= limit:
+            break
+        processed_count += 1
+        sync_stats["processed"] += 1
+        if not db_url:
+            print(f"跳过缺少DB_Url的图书条目: {title}")
+            continue
+
         create_time = pendulum.parse(result.get("create_time"), tz=utils.tz)
         create_time = create_time.replace(second=0)
 
-        book["Name"] = subject.get("title")
+        book["Name"] = title
         book["Date"] = create_time.int_timestamp
-        book["DB_Url"] = subject.get("url")
+        book["DB_Url"] = db_url
         book["Status"] = book_status.get(result.get("status"))
         book_cover, book_cover_source = _get_book_cover(subject, book.get("Name"))
-        book["Cover"] = book_cover
-        book["CoverSource"] = book_cover_source if book_cover else None
-        book["CoverStatus"] = "Ok" if book_cover else "Missing"
-        book["CoverCheckedAt"] = pendulum.now(tz=utils.tz).int_timestamp
-        book["ISBN"] = subject.get("isbn")
-        book["ISBN_13"] = subject.get("isbn13") or subject.get("isbn")
-        book["Intro"] = subject.get("intro")
-        book["Publisher"] = _extract_publisher_list(subject)
+        if book_cover:
+            book["Cover"] = book_cover
+            book["CoverSource"] = book_cover_source
+            book["CoverStatus"] = "Ok"
+        else:
+            book["CoverStatus"] = "Missing"
+        isbn = subject.get("isbn")
+        if isbn:
+            book["ISBN"] = isbn
+        isbn_13 = subject.get("isbn13") or isbn
+        if isbn_13:
+            book["ISBN_13"] = isbn_13
+        gd_url = (
+            subject.get("goodreads_url")
+            or subject.get("goodreads")
+            or subject.get("gd_url")
+        )
+        if gd_url:
+            book["GD_Url"] = gd_url
+        intro = subject.get("intro")
+        if intro:
+            book["Intro"] = intro
+        publisher_list = _extract_publisher_list(subject)
+        if publisher_list:
+            book["Publisher"] = publisher_list
         if subject.get("tags"):
-            book["Category"] = [
+            category_ids = [
                 notion_helper.get_relation_id(x, notion_helper.category_database_id, TAG_ICON_URL)
                 for x in subject.get("tags")[0:MAX_CATEGORIES_RELATION]
             ]
+            category_ids = [x for x in category_ids if x]
+            if category_ids:
+                book["Category"] = category_ids
         if subject.get("author"):
             author_ids = []
             for author_name in subject.get("author")[0:MAX_AUTHORS_RELATION]:
-                author_photo = _get_openlibrary_author_photo(author_name)
-                person_info = {"photo": author_photo, "photo_source": "OpenLibrary"} if author_photo else {"photo_source": "OpenLibrary"}
-                author_ids.append(
-                    notion_helper.get_relation_id(
-                        author_name, notion_helper.author_database_id, USER_ICON_URL, {}, person_info
-                    )
-                )
-            book["Author"] = author_ids
+                author_id = _resolve_author_relation_id(author_name, notion_helper, author_lookup)
+                if author_id:
+                    author_ids.append(author_id)
+            if author_ids:
+                book["Author"] = sorted(set(author_ids))
         if result.get("rating"):
             book["Rating"] = rating.get(result.get("rating").get("value"))
-        if result.get("comment"):
+        if result.get("comment") is not None:
             book["Remark"] = result.get("comment")
         if subject.get("rating"):
-            book["DoubanRating"] = subject.get("rating").get("value", 0)
-            book["Raters"] = subject.get("rating").get("count", 0)
+            subject_rating = subject.get("rating") or {}
+            douban_rating = subject_rating.get("value")
+            raters = subject_rating.get("count")
+            if _has_rating_value(douban_rating):
+                book["DoubanRating"] = douban_rating
+            if raters:
+                book["Raters"] = raters
         year = _extract_book_year(subject)
         if year:
-            book["Year"] = year
+            if notion_helper.ensure_select_option(notion_helper.book_database_id, "Year", year):
+                book["Year"] = year
+            else:
+                print(f"  Year选项不存在，跳过写入: {year}（请先在Notion手动添加该Select选项）")
 
         existing_book = notion_book_dict.get(book.get("DB_Url"))
         if existing_book:
-            # 新封面抓取失败时保留旧封面，避免把已有封面覆盖成空
+            sync_stats["matched_existing"] += 1
             if not book.get("Cover") and existing_book.get("Cover"):
                 book["Cover"] = existing_book.get("Cover")
+                book["CoverStatus"] = existing_book.get("CoverStatus") or "Ok"
+                if existing_book.get("CoverSource"):
+                    book["CoverSource"] = existing_book.get("CoverSource")
+            elif not book.get("Cover"):
+                book["CoverStatus"] = "Missing"
+
+            keep_if_empty_fields = [
+                "ISBN",
+                "ISBN_13",
+                "GD_Url",
+                "Intro",
+                "Year",
+                "Author",
+                "Category",
+                "Publisher",
+                "CoverSource",
+            ]
+            for field in keep_if_empty_fields:
+                if _is_blank_value(book.get(field)) and not _is_blank_value(existing_book.get(field)):
+                    book[field] = existing_book.get(field)
+            if _is_missing_positive_number(book.get("DoubanRating")) and not _is_missing_positive_number(
+                existing_book.get("DoubanRating")
+            ):
+                book["DoubanRating"] = existing_book.get("DoubanRating")
+            if _is_missing_positive_number(book.get("Raters")) and not _is_missing_positive_number(
+                existing_book.get("Raters")
+            ):
+                book["Raters"] = existing_book.get("Raters")
+
             needs_update = (
-                existing_book.get("Cover") != book.get("Cover")
+                existing_book.get("Name") != book.get("Name")
                 or existing_book.get("Date") != book.get("Date")
-                or existing_book.get("Remark") != book.get("Remark")
                 or existing_book.get("Status") != book.get("Status")
-                or existing_book.get("Rating") != book.get("Rating")
-                or existing_book.get("ISBN") != book.get("ISBN")
-                or existing_book.get("ISBN_13") != book.get("ISBN_13")
-                or existing_book.get("GD_Url") != book.get("GD_Url")
-                or existing_book.get("Intro") != book.get("Intro")
-                or existing_book.get("DoubanRating") != book.get("DoubanRating")
-                or existing_book.get("Raters") != book.get("Raters")
-                or existing_book.get("Year") != book.get("Year")
-                or existing_book.get("CoverStatus") != book.get("CoverStatus")
-                or existing_book.get("CoverSource") != book.get("CoverSource")
-                or existing_book.get("Author") != _normalize_relation_ids(book.get("Author"))
-                or existing_book.get("Category") != _normalize_relation_ids(book.get("Category"))
-                or existing_book.get("Publisher") != _normalize_multi_select_names(book.get("Publisher"))
+                or ("Remark" in book and existing_book.get("Remark") != book.get("Remark"))
+                or ("Rating" in book and existing_book.get("Rating") != book.get("Rating"))
+                or ("Cover" in book and existing_book.get("Cover") != book.get("Cover"))
+                or ("CoverStatus" in book and existing_book.get("CoverStatus") != book.get("CoverStatus"))
+                or ("CoverSource" in book and existing_book.get("CoverSource") != book.get("CoverSource"))
+                or ("ISBN" in book and existing_book.get("ISBN") != book.get("ISBN"))
+                or ("ISBN_13" in book and existing_book.get("ISBN_13") != book.get("ISBN_13"))
+                or ("GD_Url" in book and existing_book.get("GD_Url") != book.get("GD_Url"))
+                or ("Intro" in book and existing_book.get("Intro") != book.get("Intro"))
+                or ("DoubanRating" in book and existing_book.get("DoubanRating") != book.get("DoubanRating"))
+                or ("Raters" in book and existing_book.get("Raters") != book.get("Raters"))
+                or ("Year" in book and existing_book.get("Year") != book.get("Year"))
+                or (
+                    "Author" in book
+                    and existing_book.get("Author") != _normalize_relation_ids(book.get("Author"))
+                )
+                or (
+                    "Category" in book
+                    and existing_book.get("Category") != _normalize_relation_ids(book.get("Category"))
+                )
+                or (
+                    "Publisher" in book
+                    and existing_book.get("Publisher") != _normalize_multi_select_names(book.get("Publisher"))
+                )
             )
             if needs_update:
+                sync_stats["pending_update"] += 1
+                if dry_run:
+                    continue
                 print(f"更新{book.get('Name')}")
                 properties = utils.get_properties(book, book_properties_type_dict)
                 notion_helper.get_date_relation(properties, create_time)
@@ -3680,8 +4056,25 @@ def insert_book(douban_name, notion_helper):
                     properties=properties,
                     icon=icon,
                 )
-
+                duplicate_rows = notion_book_duplicates.get(book.get("DB_Url")) or []
+                for duplicate_row in duplicate_rows:
+                    duplicate_page_id = duplicate_row.get("page_id")
+                    if not duplicate_page_id or duplicate_page_id == existing_book.get("page_id"):
+                        continue
+                    notion_helper.update_page(
+                        page_id=duplicate_page_id,
+                        properties=properties,
+                        icon=icon,
+                    )
+            else:
+                sync_stats["skipped_unchanged"] += 1
         else:
+            if existing_only:
+                sync_stats["skipped_existing_only"] += 1
+                continue
+            sync_stats["pending_create"] += 1
+            if dry_run:
+                continue
             print(f"插入{book.get('Name')}")
             properties = utils.get_properties(book, book_properties_type_dict)
             notion_helper.get_date_relation(properties, create_time)
@@ -3689,9 +4082,41 @@ def insert_book(douban_name, notion_helper):
                 "database_id": notion_helper.book_database_id,
                 "type": "database_id",
             }
-            notion_helper.create_page(
+            created_page = notion_helper.create_page(
                 parent=parent, properties=properties, icon=get_icon(book.get("Cover"))
             )
+            created_book = {
+                "Name": book.get("Name"),
+                "Remark": book.get("Remark"),
+                "Status": book.get("Status"),
+                "Date": book.get("Date"),
+                "Rating": book.get("Rating"),
+                "Cover": book.get("Cover"),
+                "CoverStatus": book.get("CoverStatus"),
+                "CoverSource": book.get("CoverSource"),
+                "ISBN": book.get("ISBN"),
+                "ISBN_13": book.get("ISBN_13"),
+                "GD_Url": book.get("GD_Url"),
+                "Intro": book.get("Intro"),
+                "DoubanRating": book.get("DoubanRating"),
+                "Raters": book.get("Raters"),
+                "Year": book.get("Year"),
+                "Author": _normalize_relation_ids(book.get("Author")),
+                "Category": _normalize_relation_ids(book.get("Category")),
+                "Publisher": _normalize_multi_select_names(book.get("Publisher")),
+                "page_id": (created_page or {}).get("id"),
+            }
+            notion_book_dict[db_url] = created_book
+            notion_book_duplicates.setdefault(db_url, []).append(created_book)
+
+    if dry_run:
+        print("[dry-run] 图书同步预估结果（未执行写入）")
+        print(f"  扫描条目: {sync_stats['processed']}")
+        print(f"  已存在匹配: {sync_stats['matched_existing']}")
+        print(f"  待更新: {sync_stats['pending_update']}")
+        print(f"  待新建: {sync_stats['pending_create']}")
+        print(f"  跳过(无变化): {sync_stats['skipped_unchanged']}")
+        print(f"  跳过(existing-only): {sync_stats['skipped_existing_only']}")
 
 
 def main():
@@ -3701,7 +4126,7 @@ def main():
     parser.add_argument("--only-db-url", action="append", default=[], help="仅同步指定豆瓣条目（支持完整URL/subject id），可重复传入")
     parser.add_argument("--limit", type=int, default=0, help="最多处理条目数（0表示不限制）")
     parser.add_argument("--existing-only", action="store_true", help="仅更新Notion中已存在条目，不新增页面")
-    parser.add_argument("--dedupe-duplicates", action="store_true", help="按DB_Url归档重复电影页面，只保留最佳条目")
+    parser.add_argument("--dedupe-duplicates", action="store_true", help="按DB_Url归档重复页面，只保留最佳条目")
     parser.add_argument("--dedupe-only", action="store_true", help="仅执行重复页归档，不拉取豆瓣数据")
     parser.add_argument("--dry-run", action="store_true", help="仅预估待更新数量，不写入Notion")
     options = parser.parse_args()
@@ -3724,6 +4149,16 @@ def main():
             dry_run=options.dry_run,
         )
     else:
-        insert_book(douban_name,notion_helper)
+        insert_book(
+            douban_name,
+            notion_helper,
+            only_titles=options.only_title,
+            only_db_urls=options.only_db_url,
+            limit=options.limit,
+            existing_only=options.existing_only,
+            dedupe_duplicates=options.dedupe_duplicates,
+            dedupe_only=options.dedupe_only,
+            dry_run=options.dry_run,
+        )
 if __name__ == "__main__":
     main()
