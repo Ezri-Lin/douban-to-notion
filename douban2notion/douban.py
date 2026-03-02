@@ -749,6 +749,8 @@ def insert_movie(
             movie["_alias_titles"] = alias_titles
             lookup_year = _lookup_year_for_imdb(douban_title, subtype, movie.get("Year"))
             tmdb_poster = None
+            tmdb_original_title = None
+            imdb_from_tmdb_fallback = False
             notion_imdb_id = _normalize_imdb_id(notion_movive.get("IMDB"))
             imdb_override = _get_imdb_override(douban_title=douban_title, douban_url=movie.get("DB_Url"))
             existing_imdb_consistent = True
@@ -812,6 +814,7 @@ def insert_movie(
                         original_title = tmdb_original_title
                     if tmdb_imdb_id:
                         imdb_id = tmdb_imdb_id
+                        imdb_from_tmdb_fallback = True
                         print(f"  TMDB兜底命中IMDB: {imdb_id}")
                         found_by_search = True
                 if not found_by_search:
@@ -833,12 +836,8 @@ def insert_movie(
                         print(f"  重检未命中，保留Notion已有IMDB: {imdb_id}")
                     if not found_by_search:
                         print(f"  IMDB检索失败: {douban_title} ({movie.get('Year')}, {subtype})")
-            if (
-                imdb_id
-                and not imdb_override
-                and repair_flags.get("imdb")
-                and imdb_id != notion_imdb_id
-                and not _is_imdb_candidate_high_confidence(
+            if imdb_id and not imdb_override and repair_flags.get("imdb") and imdb_id != notion_imdb_id:
+                high_confidence = _is_imdb_candidate_high_confidence(
                     imdb_id,
                     douban_title,
                     original_title=original_title,
@@ -846,9 +845,20 @@ def insert_movie(
                     expected_year=movie.get("Year"),
                     expected_media_type=subtype,
                 )
-            ):
-                print(f"  IMDB候选低置信，忽略覆盖: {imdb_id}")
-                imdb_id = fallback_existing_imdb
+                if not high_confidence and imdb_from_tmdb_fallback:
+                    high_confidence = _is_tmdb_fallback_high_confidence(
+                        imdb_id,
+                        tmdb_original_title,
+                        douban_title,
+                        original_title=original_title,
+                        alias_titles=alias_titles,
+                        expected_media_type=subtype,
+                    )
+                    if high_confidence:
+                        print(f"  TMDB原名校验通过，保留IMDB: {imdb_id}")
+                if not high_confidence:
+                    print(f"  IMDB候选低置信，忽略覆盖: {imdb_id}")
+                    imdb_id = fallback_existing_imdb
             clear_stale_imdb = bool(
                 repair_flags.get("imdb")
                 and notion_imdb_id
@@ -1239,6 +1249,8 @@ def insert_movie(
                 alias_titles = resolved_alias_titles
             lookup_year = _lookup_year_for_imdb(douban_title, subtype, movie.get("Year"))
             tmdb_poster = None
+            tmdb_original_title = None
+            imdb_from_tmdb_fallback = False
             imdb_override = _get_imdb_override(douban_title=douban_title, douban_url=movie.get("DB_Url"))
             if imdb_override:
                 imdb_id = imdb_override
@@ -1277,6 +1289,7 @@ def insert_movie(
                         original_title = tmdb_original_title
                     if tmdb_imdb_id:
                         imdb_id = tmdb_imdb_id
+                        imdb_from_tmdb_fallback = True
                         print(f"  TMDB兜底命中IMDB: {imdb_id}")
                         found_by_search = True
                 if not found_by_search:
@@ -1294,10 +1307,8 @@ def insert_movie(
                             print(f"  从同系列条目继承IMDB: {imdb_id}")
                     if not found_by_search:
                         print(f"  IMDB检索失败: {douban_title} ({movie.get('Year')}, {subtype})")
-            if (
-                imdb_id
-                and not imdb_override
-                and not _is_imdb_candidate_high_confidence(
+            if imdb_id and not imdb_override:
+                high_confidence = _is_imdb_candidate_high_confidence(
                     imdb_id,
                     douban_title,
                     original_title=original_title,
@@ -1305,9 +1316,20 @@ def insert_movie(
                     expected_year=movie.get("Year"),
                     expected_media_type=subtype,
                 )
-            ):
-                print(f"  IMDB候选低置信，放弃写入: {imdb_id}")
-                imdb_id = None
+                if not high_confidence and imdb_from_tmdb_fallback:
+                    high_confidence = _is_tmdb_fallback_high_confidence(
+                        imdb_id,
+                        tmdb_original_title,
+                        douban_title,
+                        original_title=original_title,
+                        alias_titles=alias_titles,
+                        expected_media_type=subtype,
+                    )
+                    if high_confidence:
+                        print(f"  TMDB原名校验通过，保留IMDB: {imdb_id}")
+                if not high_confidence:
+                    print(f"  IMDB候选低置信，放弃写入: {imdb_id}")
+                    imdb_id = None
 
             imdb_info = None
             if imdb_id:
@@ -2162,6 +2184,29 @@ def _is_imdb_candidate_high_confidence(
         if abs(int(imdb_year) - int(expected_year)) > 2:
             return False
     return True
+
+
+def _is_tmdb_fallback_high_confidence(
+    imdb_id,
+    tmdb_original_title,
+    douban_title,
+    original_title=None,
+    alias_titles=None,
+    expected_media_type=None,
+):
+    imdb_id = _normalize_imdb_id(imdb_id)
+    if not imdb_id:
+        return False
+    if expected_media_type and not _is_imdb_media_type_compatible(imdb_id, expected_media_type):
+        return False
+    if not tmdb_original_title:
+        return False
+    return _is_imdb_title_consistent(
+        douban_title,
+        tmdb_original_title,
+        original_title=original_title,
+        alias_titles=alias_titles,
+    )
 
 
 def _extract_alias_titles(subject):
