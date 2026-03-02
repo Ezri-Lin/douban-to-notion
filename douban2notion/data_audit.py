@@ -79,6 +79,30 @@ def _has_latin(text: Optional[str]) -> bool:
     return bool(text) and re.search(r"[A-Za-z]", str(text)) is not None
 
 
+def _is_roman_token(token: str) -> bool:
+    t = str(token or "").strip().upper()
+    if not t:
+        return False
+    return bool(re.fullmatch(r"[IVXLCDM]+", t))
+
+
+def _has_meaningful_latin_segment(text: Optional[str]) -> bool:
+    """
+    判断混合标题中的拉丁字母是否具有“语义词”特征。
+    仅罗马数字（如 II/III/IV）不作为外文污染判定依据。
+    """
+    raw = str(text or "")
+    if not _has_latin(raw):
+        return False
+    tokens = re.findall(r"[A-Za-z]+", raw)
+    if not tokens:
+        return False
+    for token in tokens:
+        if len(token) >= 3 and not _is_roman_token(token):
+            return True
+    return False
+
+
 def _now_date_payload() -> Dict:
     return {
         "date": {
@@ -474,7 +498,7 @@ def audit_movie(
                 issues.add(ISSUE_FOREIGN_ACTOR_CHINESE)
             if _relation_has_chinese(director_ids, director_name_map):
                 issues.add(ISSUE_FOREIGN_DIRECTOR_CHINESE)
-        elif name and _has_chinese(name) and _has_latin(name):
+        elif name and _has_chinese(name) and _has_meaningful_latin_segment(name):
             issues.add(ISSUE_FOREIGN_NAME_CHINESE)
 
         if db_url and len(db_url_map.get(db_url) or []) > 1:
