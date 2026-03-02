@@ -211,12 +211,15 @@ def _extract_subject_countries(subject):
 
 
 @retry(stop_max_attempt_number=3, wait_fixed=5000)
-def fetch_subjects(user, type_, status):
+def fetch_subjects(user, type_, status, recent_days=0):
     offset = 0
     page = 0
     url = f"https://{DOUBAN_API_HOST}/api/v2/user/{user}/interests"
     total = 0
     results = []
+    cutoff_time = None
+    if recent_days and recent_days > 0:
+        cutoff_time = pendulum.now(tz=utils.tz).subtract(days=recent_days)
     while True:
         params = {
             "type": type_,
@@ -238,7 +241,27 @@ def fetch_subjects(user, type_, status):
         interests = payload.get("interests") or []
         if len(interests) == 0:
             break
-        results.extend(interests)
+        if cutoff_time is not None:
+            page_recent = []
+            has_recent_item = False
+            for item in interests:
+                create_time_raw = item.get("create_time")
+                try:
+                    create_time = pendulum.parse(create_time_raw, tz=utils.tz)
+                except Exception:
+                    # 解析失败时保守保留，避免误跳过新数据
+                    page_recent.append(item)
+                    has_recent_item = True
+                    continue
+                if create_time >= cutoff_time:
+                    page_recent.append(item)
+                    has_recent_item = True
+            results.extend(page_recent)
+            # 豆瓣兴趣列表按时间倒序返回：当前页若无近N天数据即可提前停止翻页
+            if not has_recent_item:
+                break
+        else:
+            results.extend(interests)
         print(f"total = {total}")
         print(f"size = {len(results)}")
         page += 1
@@ -493,6 +516,7 @@ def insert_movie(
     only_titles=None,
     only_db_urls=None,
     limit=0,
+    recent_days=0,
     existing_only=False,
     dedupe_duplicates=False,
     dedupe_only=False,
@@ -578,7 +602,7 @@ def insert_movie(
             return
     results = []
     for i in movie_status.keys():
-        results.extend(fetch_subjects(douban_name, "movie", i))
+        results.extend(fetch_subjects(douban_name, "movie", i, recent_days=recent_days))
     processed_count = 0
     for result in results:
         movie = {}
@@ -4125,6 +4149,7 @@ def insert_book(
     only_titles=None,
     only_db_urls=None,
     limit=0,
+    recent_days=0,
     existing_only=False,
     dedupe_duplicates=False,
     dedupe_only=False,
@@ -4200,7 +4225,7 @@ def insert_book(
     print(f"notion {len(notion_book_dict)}")
     results = []
     for status_key in book_status.keys():
-        results.extend(fetch_subjects(douban_name, "book", status_key))
+        results.extend(fetch_subjects(douban_name, "book", status_key, recent_days=recent_days))
     processed_count = 0
     for result in results:
         book = {}
@@ -4434,6 +4459,7 @@ def main():
     parser.add_argument("--only-title", action="append", default=[], help="仅同步标题包含该关键词的条目，可重复传入")
     parser.add_argument("--only-db-url", action="append", default=[], help="仅同步指定豆瓣条目（支持完整URL/subject id），可重复传入")
     parser.add_argument("--limit", type=int, default=0, help="最多处理条目数（0表示不限制）")
+    parser.add_argument("--recent-days", type=int, default=0, help="仅处理最近N天新增/更新的豆瓣条目（0表示不限制）")
     parser.add_argument("--existing-only", action="store_true", help="仅更新Notion中已存在条目，不新增页面")
     parser.add_argument("--dedupe-duplicates", action="store_true", help="按DB_Url归档重复页面，只保留最佳条目")
     parser.add_argument("--dedupe-only", action="store_true", help="仅执行重复页归档，不拉取豆瓣数据")
@@ -4452,6 +4478,7 @@ def main():
             only_titles=options.only_title,
             only_db_urls=options.only_db_url,
             limit=options.limit,
+            recent_days=options.recent_days,
             existing_only=options.existing_only,
             dedupe_duplicates=options.dedupe_duplicates,
             dedupe_only=options.dedupe_only,
@@ -4464,6 +4491,7 @@ def main():
             only_titles=options.only_title,
             only_db_urls=options.only_db_url,
             limit=options.limit,
+            recent_days=options.recent_days,
             existing_only=options.existing_only,
             dedupe_duplicates=options.dedupe_duplicates,
             dedupe_only=options.dedupe_only,

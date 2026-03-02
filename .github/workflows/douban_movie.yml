@@ -37,4 +37,4 @@ jobs:
       - name: Validate import
         run: python -m compileall douban2notion
       - name: Sync movie
-        run: python -m douban2notion.douban movie --dedupe-duplicates
+        run: python -m douban2notion.douban movie --dedupe-duplicates --recent-days 3
