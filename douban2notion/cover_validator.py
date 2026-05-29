@@ -14,6 +14,8 @@ from douban2notion.notion_helper import NotionHelper
 from douban2notion.utils import get_icon, get_property_value
 from douban2notion.cache_manager import cache_manager
 from douban2notion.config import MAX_WORKERS, MAX_URL_WORKERS
+from douban2notion.retry_utils import retry_on_exception, safe_request
+from douban2notion.performance_monitor import timing, Timer
 
 
 load_dotenv()
@@ -29,6 +31,20 @@ def now_date_payload():
     return {"date": {"start": pendulum.now("Asia/Shanghai").to_datetime_string(), "time_zone": "Asia/Shanghai"}}
 
 
+@retry_on_exception(max_retries=2, delay=0.5, backoff=2.0)
+def _check_image_url(url: str) -> bool:
+    """检查图片URL是否有效（带重试）"""
+    response = requests.get(
+        url,
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=10,
+        allow_redirects=True,
+        stream=True,
+    )
+    content_type = (response.headers.get("Content-Type") or "").lower()
+    return response.status_code == 200 and "image/" in content_type
+
+
 def is_valid_image_url(url: Optional[str]) -> bool:
     """验证图片URL是否有效（线程安全）"""
     if not url:
@@ -40,15 +56,7 @@ def is_valid_image_url(url: Optional[str]) -> bool:
         return cached_result
 
     try:
-        response = requests.get(
-            url,
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10,
-            allow_redirects=True,
-            stream=True,
-        )
-        content_type = (response.headers.get("Content-Type") or "").lower()
-        ok = response.status_code == 200 and "image/" in content_type
+        ok = _check_image_url(url)
     except Exception:
         ok = False
 
@@ -197,6 +205,43 @@ def get_openlibrary_book_cover(isbn: Optional[str]) -> Optional[str]:
     return None
 
 
+@retry_on_exception(max_retries=2, delay=0.5, backoff=2.0)
+def _fetch_openlibrary_author_photo(author_name: str) -> Optional[str]:
+    """从OpenLibrary获取作者照片（带重试）"""
+    search_url = "https://openlibrary.org/search/authors.json"
+    response = requests.get(
+        search_url,
+        params={"q": author_name},
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=10,
+    )
+    if response.status_code != 200:
+        return None
+
+    docs = response.json().get("docs") or []
+    for doc in docs:
+        author_key = doc.get("key")
+        if not author_key:
+            continue
+        author_id = author_key.strip("/").split("/")[-1]
+        if not author_id:
+            continue
+
+        author_detail = requests.get(
+            f"https://openlibrary.org/authors/{author_id}.json",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+        if author_detail.status_code != 200:
+            continue
+        photos = (author_detail.json().get("photos") or [])
+        for photo_id in photos:
+            url = f"https://covers.openlibrary.org/a/id/{photo_id}-L.jpg?default=false"
+            if is_valid_image_url(url):
+                return url
+    return None
+
+
 def get_openlibrary_author_photo(author_name: Optional[str]) -> Optional[str]:
     """获取OpenLibrary作者照片（使用缓存管理器）"""
     if not author_name:
@@ -207,44 +252,12 @@ def get_openlibrary_author_photo(author_name: Optional[str]) -> Optional[str]:
         return cached_photo
 
     try:
-        search_url = "https://openlibrary.org/search/authors.json"
-        response = requests.get(
-            search_url,
-            params={"q": author_name},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10,
-        )
-        if response.status_code != 200:
-            cache_manager.set("openlib_author_photo", author_name, None)
-            return None
-
-        docs = response.json().get("docs") or []
-        for doc in docs:
-            author_key = doc.get("key")
-            if not author_key:
-                continue
-            author_id = author_key.strip("/").split("/")[-1]
-            if not author_id:
-                continue
-
-            author_detail = requests.get(
-                f"https://openlibrary.org/authors/{author_id}.json",
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=10,
-            )
-            if author_detail.status_code != 200:
-                continue
-            photos = (author_detail.json().get("photos") or [])
-            for photo_id in photos:
-                url = f"https://covers.openlibrary.org/a/id/{photo_id}-L.jpg?default=false"
-                if is_valid_image_url(url):
-                    cache_manager.set("openlib_author_photo", author_name, url)
-                    return url
+        photo_url = _fetch_openlibrary_author_photo(author_name)
     except Exception:
-        pass
+        photo_url = None
 
-    cache_manager.set("openlib_author_photo", author_name, None)
-    return None
+    cache_manager.set("openlib_author_photo", author_name, photo_url)
+    return photo_url
 
 
 def get_author_name_by_id(notion_helper: NotionHelper, author_id: str) -> Optional[str]:
@@ -320,6 +333,7 @@ def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bo
         return True, False
 
 
+@timing
 def validate_movie_covers(nh: NotionHelper, max_workers: int = MAX_WORKERS):
     """并行验证电影封面"""
     pages = nh.query_all(database_id=nh.movie_database_id)
@@ -430,6 +444,7 @@ def _get_book_cover_parallel(title: str, author_name: Optional[str], isbn: Optio
     return None, None
 
 
+@timing
 def validate_book_covers(nh: NotionHelper, max_workers: int = MAX_WORKERS):
     """并行验证书籍封面"""
     pages = nh.query_all(database_id=nh.book_database_id)
@@ -539,6 +554,7 @@ def _validate_single_person_photo(nh: NotionHelper, page: Dict, has_photo_proper
         return True, False
 
 
+@timing
 def validate_people_photos(nh: NotionHelper, db_id: str, label: str, imdb_enabled: bool, max_workers: int = MAX_WORKERS):
     """并行验证人物照片"""
     if not db_id:

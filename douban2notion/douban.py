@@ -12,6 +12,9 @@ import requests
 from dotenv import load_dotenv
 from tqdm import tqdm
 
+from douban2notion.retry_utils import retry_on_exception, safe_request
+from douban2notion.performance_monitor import timing, Timer
+
 load_dotenv()
 
 from douban2notion.notion_helper import NotionHelper
@@ -514,6 +517,7 @@ def _build_light_movie_update_payload(movie):
     return payload
 
 
+@timing
 def insert_movie(
     douban_name,
     notion_helper,
@@ -3420,6 +3424,20 @@ def get_imdb_cast_and_crew(imdb_id):
     IMDB_CAST_CREW_CACHE[imdb_id] = result
     return result
 
+@retry_on_exception(max_retries=2, delay=1.0, backoff=2.0)
+def _fetch_imdb_page(imdb_id: str) -> Optional[requests.Response]:
+    """获取IMDB页面（带重试）"""
+    url = f"https://www.imdb.com/title/{imdb_id}/"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9'
+    }
+    response = requests.get(url, headers=headers, timeout=15)
+    if response.status_code != 200:
+        raise RuntimeError(f"HTTP {response.status_code}")
+    return response
+
+
 def get_imdb_info(imdb_id):
     """从IMDB获取电影信息（海报、原名、评分）"""
     if not imdb_id:
@@ -3435,13 +3453,8 @@ def get_imdb_info(imdb_id):
     }
 
     try:
-        url = f"https://www.imdb.com/title/{imdb_id}/"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9'
-        }
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code == 200:
+        response = _fetch_imdb_page(imdb_id)
+        if response:
             soup = _create_soup(response.content)
 
             # 获取海报
@@ -4218,6 +4231,7 @@ def _resolve_author_relation_id(author_name, notion_helper, author_lookup):
     return page_id
 
 
+@timing
 def insert_book(
     douban_name,
     notion_helper,
@@ -4549,8 +4563,16 @@ def main():
     parser.add_argument("--dedupe-duplicates", action="store_true", help="按DB_Url归档重复页面，只保留最佳条目")
     parser.add_argument("--dedupe-only", action="store_true", help="仅执行重复页归档，不拉取豆瓣数据")
     parser.add_argument("--dry-run", action="store_true", help="仅预估待更新数量，不写入Notion")
+    parser.add_argument("--skip-config-check", action="store_true", help="跳过配置验证")
     options = parser.parse_args()
     type = options.type
+
+    # 配置验证
+    if not options.skip_config_check:
+        from douban2notion.config_validator import validate_config_or_exit, print_config_summary
+        validate_config_or_exit(type)
+        print_config_summary(type)
+
     if options.dedupe_only:
         options.dedupe_duplicates = True
     notion_helper = NotionHelper(type)

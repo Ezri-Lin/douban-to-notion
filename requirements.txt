@@ -7,3 +7,4 @@ python-dotenv==1.2.1
 beautifulsoup4==4.12.3
 lxml>=4.9.3
 tqdm>=4.66.0
+pytest>=7.4.0
