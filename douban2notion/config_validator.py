@@ -13,7 +13,6 @@ from dotenv import load_dotenv
 # 必要配置项及其说明
 REQUIRED_CONFIG = {
     "DOUBAN_NAME": "豆瓣用户名",
-    "AUTH_TOKEN": "豆瓣认证Token",
     "NOTION_TOKEN": "Notion API Token",
 }
 
