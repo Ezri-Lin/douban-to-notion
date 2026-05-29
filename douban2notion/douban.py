@@ -3178,11 +3178,14 @@ def _enrich_cast_crew_with_tmdb_fallback(imdb_id, media_type, cast_crew):
     needs_director = not (base.get("directors") or [])
     if not needs_actor and not needs_director:
         return base
+    print(f"  IMDB数据不完整，尝试TMDB fallback...")
     tmdb_result = _tmdb_people_from_credits(imdb_id, media_type)
     if needs_actor and tmdb_result.get("actors"):
         base["actors"] = tmdb_result.get("actors")
+        print(f"  TMDB补充演员: {len(base['actors'])} 个")
     if needs_director and tmdb_result.get("directors"):
         base["directors"] = tmdb_result.get("directors")
+        print(f"  TMDB补充导演: {len(base['directors'])} 个")
     return base
 
 
@@ -3425,15 +3428,21 @@ def get_imdb_cast_and_crew(imdb_id):
     IMDB_CAST_CREW_CACHE[imdb_id] = result
     return result
 
-@retry_on_exception(max_retries=2, delay=1.0, backoff=2.0)
+@retry_on_exception(max_retries=3, delay=2.0, backoff=2.0)
 def _fetch_imdb_page(imdb_id: str) -> Optional[requests.Response]:
-    """获取IMDB页面（带重试）"""
+    """获取IMDB页面（带重试，处理202状态码）"""
+    import time
     url = f"https://www.imdb.com/title/{imdb_id}/"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept-Language': 'en-US,en;q=0.9'
     }
     response = requests.get(url, headers=headers, timeout=15)
+    # 202 表示请求被接受但需要等待，IMDB 反爬机制
+    if response.status_code == 202:
+        print(f"  IMDB 返回 202，等待 5 秒后重试...")
+        time.sleep(5)
+        raise RuntimeError(f"HTTP 202")
     if response.status_code != 200:
         raise RuntimeError(f"HTTP {response.status_code}")
     return response
