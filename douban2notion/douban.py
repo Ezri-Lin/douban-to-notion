@@ -5,6 +5,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
+from typing import Optional
 from bs4 import BeautifulSoup
 import pendulum
 from retrying import retry
