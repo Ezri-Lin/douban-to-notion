@@ -3594,6 +3594,43 @@ def get_goodreads_cover(title, author=None, isbn=None):
     return None
 
 
+def get_goodreads_rating(isbn):
+    """通过 ISBN 获取 Goodreads 评分"""
+    if not isbn:
+        return None
+
+    # 使用缓存
+    cache_key = f"goodreads_rating_{isbn}"
+    if cache_key in IMDB_INFO_CACHE:
+        return IMDB_INFO_CACHE[cache_key]
+
+    url = f"https://www.goodreads.com/book/isbn/{isbn}"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
+        if response.ok:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            rating_div = soup.find('div', class_='RatingStatistics__rating')
+            if rating_div:
+                rating_text = rating_div.text.strip()
+                try:
+                    rating = float(rating_text)
+                    IMDB_INFO_CACHE[cache_key] = rating
+                    return rating
+                except ValueError:
+                    pass
+    except Exception as e:
+        print(f"  获取 Goodreads 评分失败 ({isbn}): {str(e)[:50]}")
+
+    IMDB_INFO_CACHE[cache_key] = None
+    return None
+
+
 def _is_valid_image_url(url):
     if not url:
         return False
@@ -4416,6 +4453,15 @@ def insert_book(
                 book["DoubanRating"] = douban_rating
             if raters:
                 book["Raters"] = raters
+
+        # 获取 Goodreads 评分
+        isbn = subject.get("isbn13") or subject.get("isbn")
+        if isbn:
+            goodreads_rating = get_goodreads_rating(isbn)
+            if goodreads_rating:
+                book["GoodreadsRating"] = goodreads_rating
+                print(f"  Goodreads评分: {goodreads_rating}")
+
         year = _extract_book_year(subject)
         if year:
             if notion_helper.ensure_select_option(notion_helper.book_database_id, "Year", year):

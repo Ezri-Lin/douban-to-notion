@@ -37,6 +37,7 @@ book_properties_type_dict = {
     "Publisher":MULTI_SELECT,
     "Year":SELECT,
     "DoubanRating":NUMBER,
+    "GoodreadsRating":NUMBER,
     "Raters":NUMBER,
     "DataIssue": MULTI_SELECT,
 }
