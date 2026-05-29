@@ -1,21 +1,27 @@
 import argparse
 import os
-from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Optional, Tuple
+import threading
 
 import pendulum
 import requests
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 from douban2notion.douban import get_goodreads_cover, get_imdb_info, get_imdb_person_info
 from douban2notion.notion_helper import NotionHelper
 from douban2notion.utils import get_icon, get_property_value
+from douban2notion.cache_manager import cache_manager
+from douban2notion.config import MAX_WORKERS, MAX_URL_WORKERS
 
 
 load_dotenv()
 
-URL_VALIDATION_CACHE = {}
-AUTHOR_NAME_CACHE = {}
-OPENLIB_AUTHOR_PHOTO_CACHE = {}
+# 使用统一的缓存管理器
+URL_VALIDATION_CACHE = cache_manager.get_cache("url_validation")
+AUTHOR_NAME_CACHE = cache_manager.get_cache("author_name")
+OPENLIB_AUTHOR_PHOTO_CACHE = cache_manager.get_cache("openlib_author_photo")
 DEFAULT_USER_ICON_URL = "https://www.notion.so/icons/user-circle-filled_gray.svg"
 
 
@@ -24,10 +30,15 @@ def now_date_payload():
 
 
 def is_valid_image_url(url: Optional[str]) -> bool:
+    """验证图片URL是否有效（线程安全）"""
     if not url:
         return False
-    if url in URL_VALIDATION_CACHE:
-        return URL_VALIDATION_CACHE[url]
+
+    # 先检查缓存
+    cached_result = cache_manager.get("url_validation", url)
+    if cached_result is not None:
+        return cached_result
+
     try:
         response = requests.get(
             url,
@@ -40,8 +51,41 @@ def is_valid_image_url(url: Optional[str]) -> bool:
         ok = response.status_code == 200 and "image/" in content_type
     except Exception:
         ok = False
-    URL_VALIDATION_CACHE[url] = ok
+
+    # 线程安全地写入缓存
+    cache_manager.set("url_validation", url, ok)
     return ok
+
+
+def batch_validate_urls(urls: List[str], max_workers: int = MAX_URL_WORKERS) -> Dict[str, bool]:
+    """批量验证URL有效性（并行处理）"""
+    if not urls:
+        return {}
+
+    # 过滤掉已经在缓存中的URL
+    urls_to_check = [url for url in urls if url and not cache_manager.has("url_validation", url)]
+    results = {}
+
+    # 如果所有URL都在缓存中，直接返回
+    if not urls_to_check:
+        return {url: cache_manager.get("url_validation", url, False) for url in urls}
+
+    # 并行验证URL
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_url = {executor.submit(is_valid_image_url, url): url for url in urls_to_check}
+        for future in as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                results[url] = future.result()
+            except Exception:
+                results[url] = False
+
+    # 合并缓存中的结果
+    for url in urls:
+        if url not in results:
+            results[url] = cache_manager.get("url_validation", url, False)
+
+    return results
 
 
 def get_files_url(page, property_name: str) -> Optional[str]:
@@ -154,10 +198,13 @@ def get_openlibrary_book_cover(isbn: Optional[str]) -> Optional[str]:
 
 
 def get_openlibrary_author_photo(author_name: Optional[str]) -> Optional[str]:
+    """获取OpenLibrary作者照片（使用缓存管理器）"""
     if not author_name:
         return None
-    if author_name in OPENLIB_AUTHOR_PHOTO_CACHE:
-        return OPENLIB_AUTHOR_PHOTO_CACHE[author_name]
+
+    cached_photo = cache_manager.get("openlib_author_photo", author_name)
+    if cached_photo is not None:
+        return cached_photo
 
     try:
         search_url = "https://openlibrary.org/search/authors.json"
@@ -168,7 +215,7 @@ def get_openlibrary_author_photo(author_name: Optional[str]) -> Optional[str]:
             timeout=10,
         )
         if response.status_code != 200:
-            OPENLIB_AUTHOR_PHOTO_CACHE[author_name] = None
+            cache_manager.set("openlib_author_photo", author_name, None)
             return None
 
         docs = response.json().get("docs") or []
@@ -191,136 +238,309 @@ def get_openlibrary_author_photo(author_name: Optional[str]) -> Optional[str]:
             for photo_id in photos:
                 url = f"https://covers.openlibrary.org/a/id/{photo_id}-L.jpg?default=false"
                 if is_valid_image_url(url):
-                    OPENLIB_AUTHOR_PHOTO_CACHE[author_name] = url
+                    cache_manager.set("openlib_author_photo", author_name, url)
                     return url
     except Exception:
         pass
 
-    OPENLIB_AUTHOR_PHOTO_CACHE[author_name] = None
+    cache_manager.set("openlib_author_photo", author_name, None)
     return None
 
 
 def get_author_name_by_id(notion_helper: NotionHelper, author_id: str) -> Optional[str]:
-    if author_id in AUTHOR_NAME_CACHE:
-        return AUTHOR_NAME_CACHE[author_id]
+    """获取作者名称（使用缓存管理器）"""
+    cached_name = cache_manager.get("author_name", author_id)
+    if cached_name is not None:
+        return cached_name
+
     try:
         page = notion_helper.client.pages.retrieve(page_id=author_id)
         name = get_title_value(page, "Name")
     except Exception:
         name = None
-    AUTHOR_NAME_CACHE[author_id] = name
+
+    cache_manager.set("author_name", author_id, name)
     return name
 
 
-def validate_movie_covers(nh: NotionHelper):
+def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bool]:
+    """验证单个电影封面（用于并行处理）"""
+    page_id = page.get("id")
+    prop_cover = get_files_url(page, "Cover")
+    icon_url = get_icon_url(page)
+    cover_url = get_cover_url(page)
+
+    # 批量验证3个URL
+    urls_to_validate = [url for url in [prop_cover, icon_url, cover_url] if url]
+    if urls_to_validate:
+        validation_results = batch_validate_urls(urls_to_validate, max_workers=3)
+        valid = all(validation_results.get(url, False) for url in urls_to_validate)
+    else:
+        valid = False
+
+    if valid:
+        update_check_fields(
+            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok", update_checked_at=False
+        )
+        remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
+        return True, False  # checked, fixed
+
+    imdb_id = get_rich_text_value(page, "IMDB")
+    if not imdb_id:
+        status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
+        update_check_fields(
+            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status, update_checked_at=False
+        )
+        return True, False
+
+    imdb_info = get_imdb_info(imdb_id)
+    new_cover = (imdb_info or {}).get("poster")
+    if not new_cover or not is_valid_image_url(new_cover):
+        status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
+        update_check_fields(
+            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status, update_checked_at=False
+        )
+        return True, False
+
+    try:
+        update_page_media(nh.client, page_id, "Cover", new_cover, write_property=True)
+        update_check_fields(
+            nh.client,
+            page,
+            "CoverStatus",
+            "CoverCheckedAt",
+            "CoverSource",
+            "Ok",
+            "IMDB",
+            update_checked_at=False,
+        )
+        remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
+        return True, True  # checked, fixed
+    except Exception:
+        return True, False
+
+
+def validate_movie_covers(nh: NotionHelper, max_workers: int = MAX_WORKERS):
+    """并行验证电影封面"""
     pages = nh.query_all(database_id=nh.movie_database_id)
     fixed = 0
     checked = 0
-    for page in pages:
-        checked += 1
-        page_id = page.get("id")
-        prop_cover = get_files_url(page, "Cover")
-        icon_url = get_icon_url(page)
-        cover_url = get_cover_url(page)
-        valid = is_valid_image_url(prop_cover) and is_valid_image_url(icon_url) and is_valid_image_url(cover_url)
-        if valid:
-            update_check_fields(
-                nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok", update_checked_at=False
-            )
-            remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
-            continue
 
-        imdb_id = get_rich_text_value(page, "IMDB")
-        if not imdb_id:
-            status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
-            update_check_fields(
-                nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status, update_checked_at=False
-            )
-            continue
-        imdb_info = get_imdb_info(imdb_id)
-        new_cover = (imdb_info or {}).get("poster")
-        if not new_cover or not is_valid_image_url(new_cover):
-            status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
-            update_check_fields(
-                nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status, update_checked_at=False
-            )
-            continue
-        try:
-            update_page_media(nh.client, page_id, "Cover", new_cover, write_property=True)
-            update_check_fields(
-                nh.client,
-                page,
-                "CoverStatus",
-                "CoverCheckedAt",
-                "CoverSource",
-                "Ok",
-                "IMDB",
-                update_checked_at=False,
-            )
-            remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
-            fixed += 1
-        except Exception:
-            continue
+    print(f"[Movie] 开始验证 {len(pages)} 个电影封面 (并发数: {max_workers})")
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_page = {
+            executor.submit(_validate_single_movie_cover, nh, page): page
+            for page in pages
+        }
+
+        with tqdm(total=len(pages), desc="验证电影封面", unit="个") as pbar:
+            for future in as_completed(future_to_page):
+                try:
+                    page_checked, page_fixed = future.result()
+                    checked += page_checked
+                    fixed += page_fixed
+                except Exception as e:
+                    print(f"  验证失败: {str(e)[:100]}")
+                pbar.update(1)
+
     print(f"[Movie] checked={checked} fixed={fixed}")
 
 
-def validate_book_covers(nh: NotionHelper):
+def _validate_single_book_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bool]:
+    """验证单个书籍封面（用于并行处理）"""
+    page_id = page.get("id")
+    prop_cover = get_files_url(page, "Cover")
+    icon_url = get_icon_url(page)
+    cover_url = get_cover_url(page)
+
+    # 批量验证3个URL
+    urls_to_validate = [url for url in [prop_cover, icon_url, cover_url] if url]
+    if urls_to_validate:
+        validation_results = batch_validate_urls(urls_to_validate, max_workers=3)
+        valid = all(validation_results.get(url, False) for url in urls_to_validate)
+    else:
+        valid = False
+
+    if valid:
+        update_check_fields(
+            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok", update_checked_at=False
+        )
+        remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
+        return True, False
+
+    title = get_title_value(page, "Name")
+    isbn = get_rich_text_value(page, "ISBN")
+    author_rel = ((page.get("properties") or {}).get("Author") or {}).get("relation") or []
+    author_name = None
+    if author_rel:
+        author_name = get_author_name_by_id(nh, author_rel[0].get("id"))
+
+    # 并行尝试多个封面源
+    new_cover, source = _get_book_cover_parallel(title, author_name, isbn)
+
+    if not new_cover:
+        status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
+        update_check_fields(
+            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status, update_checked_at=False
+        )
+        return True, False
+
+    try:
+        update_page_media(nh.client, page_id, "Cover", new_cover, write_property=True)
+        update_check_fields(
+            nh.client,
+            page,
+            "CoverStatus",
+            "CoverCheckedAt",
+            "CoverSource",
+            "Ok",
+            source,
+            update_checked_at=False,
+        )
+        remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
+        return True, True
+    except Exception:
+        return True, False
+
+
+def _get_book_cover_parallel(title: str, author_name: Optional[str], isbn: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """并行尝试多个书籍封面源"""
+    cover_sources = [
+        ("Goodreads", lambda: get_goodreads_cover(title, author=author_name, isbn=isbn)),
+        ("OpenLibrary", lambda: get_openlibrary_book_cover(isbn)),
+    ]
+
+    with ThreadPoolExecutor(max_workers=len(cover_sources)) as executor:
+        future_to_source = {
+            executor.submit(source_func): source_name
+            for source_name, source_func in cover_sources
+        }
+
+        # 返回第一个成功的结果
+        for future in as_completed(future_to_source):
+            source_name = future_to_source[future]
+            try:
+                result = future.result()
+                if result and is_valid_image_url(result):
+                    return result, source_name
+            except Exception:
+                continue
+
+    return None, None
+
+
+def validate_book_covers(nh: NotionHelper, max_workers: int = MAX_WORKERS):
+    """并行验证书籍封面"""
     pages = nh.query_all(database_id=nh.book_database_id)
     fixed = 0
     checked = 0
-    for page in pages:
-        checked += 1
-        page_id = page.get("id")
-        prop_cover = get_files_url(page, "Cover")
-        icon_url = get_icon_url(page)
-        cover_url = get_cover_url(page)
-        valid = is_valid_image_url(prop_cover) and is_valid_image_url(icon_url) and is_valid_image_url(cover_url)
-        if valid:
-            update_check_fields(
-                nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok", update_checked_at=False
-            )
-            remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
-            continue
 
-        title = get_title_value(page, "Name")
-        isbn = get_rich_text_value(page, "ISBN")
-        author_rel = ((page.get("properties") or {}).get("Author") or {}).get("relation") or []
-        author_name = None
-        if author_rel:
-            author_name = get_author_name_by_id(nh, author_rel[0].get("id"))
+    print(f"[Book] 开始验证 {len(pages)} 个书籍封面 (并发数: {max_workers})")
 
-        new_cover = get_goodreads_cover(title, author=author_name, isbn=isbn)
-        source = "Goodreads"
-        if not is_valid_image_url(new_cover):
-            new_cover = get_openlibrary_book_cover(isbn)
-            source = "OpenLibrary"
-        if not new_cover:
-            status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
-            update_check_fields(
-                nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status, update_checked_at=False
-            )
-            continue
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_page = {
+            executor.submit(_validate_single_book_cover, nh, page): page
+            for page in pages
+        }
 
-        try:
-            update_page_media(nh.client, page_id, "Cover", new_cover, write_property=True)
-            update_check_fields(
-                nh.client,
-                page,
-                "CoverStatus",
-                "CoverCheckedAt",
-                "CoverSource",
-                "Ok",
-                source,
-                update_checked_at=False,
-            )
-            remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
-            fixed += 1
-        except Exception:
-            continue
+        with tqdm(total=len(pages), desc="验证书籍封面", unit="个") as pbar:
+            for future in as_completed(future_to_page):
+                try:
+                    page_checked, page_fixed = future.result()
+                    checked += page_checked
+                    fixed += page_fixed
+                except Exception as e:
+                    print(f"  验证失败: {str(e)[:100]}")
+                pbar.update(1)
+
     print(f"[Book] checked={checked} fixed={fixed}")
 
 
-def validate_people_photos(nh: NotionHelper, db_id: str, label: str, imdb_enabled: bool):
+def _validate_single_person_photo(nh: NotionHelper, page: Dict, has_photo_property: bool, has_imdb_property: bool, imdb_enabled: bool) -> Tuple[bool, bool]:
+    """验证单个人物照片（用于并行处理）"""
+    page_id = page.get("id")
+    name = get_title_value(page, "Name")
+
+    prop_photo = get_files_url(page, "Photo") if has_photo_property else None
+    icon_url = get_icon_url(page)
+    cover_url = get_cover_url(page)
+
+    # 批量验证URL
+    urls_to_validate = []
+    if has_photo_property and prop_photo:
+        urls_to_validate.append(prop_photo)
+    if icon_url:
+        urls_to_validate.append(icon_url)
+    if cover_url:
+        urls_to_validate.append(cover_url)
+
+    if urls_to_validate:
+        validation_results = batch_validate_urls(urls_to_validate, max_workers=3)
+        valid_photo = validation_results.get(prop_photo, False) if has_photo_property and prop_photo else True
+        valid_icon = validation_results.get(icon_url, False) if icon_url else False
+        valid_cover = validation_results.get(cover_url, False) if cover_url else False
+    else:
+        valid_photo = True if has_photo_property and prop_photo else False
+        valid_icon = False
+        valid_cover = False
+
+    is_default_user_icon = bool(icon_url) and icon_url == DEFAULT_USER_ICON_URL
+
+    # 如果属性图片可用，但页面icon/cover丢失，直接用已有Photo回填
+    if has_photo_property and valid_photo and (not valid_icon or not valid_cover or is_default_user_icon) and prop_photo:
+        try:
+            update_page_media(
+                nh.client,
+                page_id,
+                property_name="Photo",
+                image_url=prop_photo,
+                write_property=False,
+            )
+            source = get_property_value(((page.get("properties") or {}).get("PhotoSource") or {}))
+            update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", "Ok", source)
+            remove_data_issue_tags(nh.client, page, {"BrokenPhoto", "MissingPhoto"})
+            return True, True
+        except Exception:
+            pass
+
+    if valid_photo and valid_icon and valid_cover:
+        update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", "Ok")
+        remove_data_issue_tags(nh.client, page, {"BrokenPhoto", "MissingPhoto"})
+        return True, False
+
+    new_photo = None
+    if imdb_enabled and has_imdb_property:
+        imdb_id = get_rich_text_value(page, "IMDB")
+        if imdb_id:
+            person = get_imdb_person_info(imdb_id)
+            new_photo = (person or {}).get("photo")
+    else:
+        new_photo = get_openlibrary_author_photo(name)
+
+    if not new_photo or not is_valid_image_url(new_photo):
+        status = "Missing" if (not prop_photo and not icon_url and not cover_url) else "Broken"
+        update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", status)
+        return True, False
+
+    try:
+        update_page_media(
+            nh.client,
+            page_id,
+            property_name="Photo" if has_photo_property else None,
+            image_url=new_photo,
+            write_property=has_photo_property,
+        )
+        source = "IMDB" if imdb_enabled else "OpenLibrary"
+        update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", "Ok", source)
+        remove_data_issue_tags(nh.client, page, {"BrokenPhoto", "MissingPhoto"})
+        return True, True
+    except Exception:
+        return True, False
+
+
+def validate_people_photos(nh: NotionHelper, db_id: str, label: str, imdb_enabled: bool, max_workers: int = MAX_WORKERS):
+    """并行验证人物照片"""
     if not db_id:
         print(f"[{label}] skipped (db not found)")
         return
@@ -332,70 +552,27 @@ def validate_people_photos(nh: NotionHelper, db_id: str, label: str, imdb_enable
     pages = nh.query_all(database_id=db_id)
     fixed = 0
     checked = 0
-    for page in pages:
-        checked += 1
-        page_id = page.get("id")
-        name = get_title_value(page, "Name")
 
-        prop_photo = get_files_url(page, "Photo") if has_photo_property else None
-        icon_url = get_icon_url(page)
-        cover_url = get_cover_url(page)
-        valid_photo = is_valid_image_url(prop_photo) if has_photo_property else True
-        valid_icon = is_valid_image_url(icon_url)
-        valid_cover = is_valid_image_url(cover_url)
-        is_default_user_icon = bool(icon_url) and icon_url == DEFAULT_USER_ICON_URL
+    print(f"[{label}] 开始验证 {len(pages)} 个人物照片 (并发数: {max_workers})")
 
-        # 如果属性图片可用，但页面icon/cover丢失，直接用已有Photo回填，避免依赖IMDb再次抓取。
-        if has_photo_property and valid_photo and (not valid_icon or not valid_cover or is_default_user_icon) and prop_photo:
-            try:
-                update_page_media(
-                    nh.client,
-                    page_id,
-                    property_name="Photo",
-                    image_url=prop_photo,
-                    write_property=False,
-                )
-                source = get_property_value(((page.get("properties") or {}).get("PhotoSource") or {}))
-                update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", "Ok", source)
-                remove_data_issue_tags(nh.client, page, {"BrokenPhoto", "MissingPhoto"})
-                fixed += 1
-                continue
-            except Exception:
-                pass
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_page = {
+            executor.submit(
+                _validate_single_person_photo, nh, page, has_photo_property, has_imdb_property, imdb_enabled
+            ): page
+            for page in pages
+        }
 
-        if valid_photo and valid_icon and valid_cover:
-            update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", "Ok")
-            remove_data_issue_tags(nh.client, page, {"BrokenPhoto", "MissingPhoto"})
-            continue
+        with tqdm(total=len(pages), desc=f"验证{label}照片", unit="个") as pbar:
+            for future in as_completed(future_to_page):
+                try:
+                    page_checked, page_fixed = future.result()
+                    checked += page_checked
+                    fixed += page_fixed
+                except Exception as e:
+                    print(f"  验证失败: {str(e)[:100]}")
+                pbar.update(1)
 
-        new_photo = None
-        if imdb_enabled and has_imdb_property:
-            imdb_id = get_rich_text_value(page, "IMDB")
-            if imdb_id:
-                person = get_imdb_person_info(imdb_id)
-                new_photo = (person or {}).get("photo")
-        else:
-            new_photo = get_openlibrary_author_photo(name)
-
-        if not new_photo or not is_valid_image_url(new_photo):
-            status = "Missing" if (not prop_photo and not icon_url and not cover_url) else "Broken"
-            update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", status)
-            continue
-
-        try:
-            update_page_media(
-                nh.client,
-                page_id,
-                property_name="Photo" if has_photo_property else None,
-                image_url=new_photo,
-                write_property=has_photo_property,
-            )
-            source = "IMDB" if imdb_enabled else "OpenLibrary"
-            update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", "Ok", source)
-            remove_data_issue_tags(nh.client, page, {"BrokenPhoto", "MissingPhoto"})
-            fixed += 1
-        except Exception:
-            continue
     print(f"[{label}] checked={checked} fixed={fixed}")
 
 
@@ -407,7 +584,7 @@ def build_helper(kind: str) -> Optional[NotionHelper]:
         return None
 
 
-def run(scope: str):
+def run(scope: str, max_workers: int = MAX_WORKERS):
     movie_helper = None
     book_helper = None
 
@@ -417,15 +594,15 @@ def run(scope: str):
         book_helper = build_helper("book")
 
     if scope in ("all", "movie") and movie_helper and movie_helper.movie_database_id:
-        validate_movie_covers(movie_helper)
+        validate_movie_covers(movie_helper, max_workers=max_workers)
     if scope in ("all", "book") and book_helper and book_helper.book_database_id:
-        validate_book_covers(book_helper)
+        validate_book_covers(book_helper, max_workers=max_workers)
     if scope in ("all", "actor") and movie_helper:
-        validate_people_photos(movie_helper, movie_helper.actor_database_id, "Actor", imdb_enabled=True)
+        validate_people_photos(movie_helper, movie_helper.actor_database_id, "Actor", imdb_enabled=True, max_workers=max_workers)
     if scope in ("all", "director") and movie_helper:
-        validate_people_photos(movie_helper, movie_helper.director_database_id, "Director", imdb_enabled=True)
+        validate_people_photos(movie_helper, movie_helper.director_database_id, "Director", imdb_enabled=True, max_workers=max_workers)
     if scope in ("all", "author") and book_helper:
-        validate_people_photos(book_helper, book_helper.author_database_id, "Author", imdb_enabled=False)
+        validate_people_photos(book_helper, book_helper.author_database_id, "Author", imdb_enabled=False, max_workers=max_workers)
 
 
 def main():
@@ -436,8 +613,14 @@ def main():
         default="all",
         choices=["all", "movie", "book", "actor", "director", "author"],
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=MAX_WORKERS,
+        help=f"并发线程数 (默认: {MAX_WORKERS})",
+    )
     args = parser.parse_args()
-    run(args.scope)
+    run(args.scope, max_workers=args.workers)
 
 
 if __name__ == "__main__":

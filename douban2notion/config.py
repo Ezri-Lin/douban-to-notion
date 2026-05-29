@@ -1,4 +1,6 @@
 
+import os
+
 RICH_TEXT = "rich_text"
 URL = "url"
 RELATION = "relation"
@@ -9,6 +11,11 @@ STATUS = "status"
 TITLE = "title"
 SELECT = "select"
 MULTI_SELECT = "multi_select"
+
+# 并发配置
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "10"))
+MAX_URL_WORKERS = int(os.getenv("URL_VALIDATION_WORKERS", "5"))
+COVER_FETCH_WORKERS = int(os.getenv("COVER_FETCH_WORKERS", "5"))
 
 book_properties_type_dict = {
     "Name":TITLE,

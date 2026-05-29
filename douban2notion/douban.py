@@ -3,17 +3,20 @@ import html
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
 from bs4 import BeautifulSoup
 import pendulum
 from retrying import retry
 import requests
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 load_dotenv()
 
 from douban2notion.notion_helper import NotionHelper
 from douban2notion import utils
+from douban2notion.cache_manager import cache_manager
 
 DOUBAN_API_HOST = os.getenv("DOUBAN_API_HOST", "frodo.douban.com")
 DOUBAN_API_KEY = os.getenv("DOUBAN_API_KEY", "0ac44ae016490db2204ce0a042db2916")
@@ -28,7 +31,8 @@ from douban2notion.config import (
     MAX_DIRECTORS_RELATION,
     MAX_CATEGORIES_RELATION,
     MAX_AUTHORS_RELATION,
-    MAX_PUBLISHERS_MULTI_SELECT
+    MAX_PUBLISHERS_MULTI_SELECT,
+    COVER_FETCH_WORKERS
 )
 from douban2notion.utils import get_icon
 
@@ -58,19 +62,19 @@ headers = {
     "referer": "https://servicewechat.com/wx2f9b06c1de1ccfca/84/page-frame.html",
 }
 
-# 外链封面可用性缓存，避免重复网络探测
-COVER_URL_VALIDITY_CACHE = {}
-AUTHOR_PHOTO_CACHE = {}
-IMDB_INFO_CACHE = {}
-IMDB_CAST_CREW_CACHE = {}
-IMDB_PERSON_CACHE = {}
-IMDB_SEARCH_CACHE = {}
-TMDB_SEARCH_CACHE = {}
-RELATION_NAME_CACHE = {}
-DOUBAN_SUBJECT_DETAIL_CACHE = {}
-IMDB_MEDIA_TYPE_CACHE = {}
-TMDB_CAST_CREW_BY_IMDB_CACHE = {}
-TMDB_PERSON_PHOTO_BY_NAME_CACHE = {}
+# 使用统一的缓存管理器
+COVER_URL_VALIDITY_CACHE = cache_manager.get_cache("cover_url_validation")
+AUTHOR_PHOTO_CACHE = cache_manager.get_cache("author_photo")
+IMDB_INFO_CACHE = cache_manager.get_cache("imdb_info")
+IMDB_CAST_CREW_CACHE = cache_manager.get_cache("imdb_cast_crew")
+IMDB_PERSON_CACHE = cache_manager.get_cache("imdb_person")
+IMDB_SEARCH_CACHE = cache_manager.get_cache("imdb_search")
+TMDB_SEARCH_CACHE = cache_manager.get_cache("tmdb_search")
+RELATION_NAME_CACHE = cache_manager.get_cache("relation_name")
+DOUBAN_SUBJECT_DETAIL_CACHE = cache_manager.get_cache("douban_subject_detail")
+IMDB_MEDIA_TYPE_CACHE = cache_manager.get_cache("imdb_media_type")
+TMDB_CAST_CREW_BY_IMDB_CACHE = cache_manager.get_cache("tmdb_cast_crew_by_imdb")
+TMDB_PERSON_PHOTO_BY_NAME_CACHE = cache_manager.get_cache("tmdb_person_photo_by_name")
 _SOUP_PARSER = None
 _SOUP_FALLBACK_NOTIFIED = False
 
@@ -603,21 +607,30 @@ def insert_movie(
     results = []
     for i in movie_status.keys():
         results.extend(fetch_subjects(douban_name, "movie", i, recent_days=recent_days))
-    processed_count = 0
+
+    # 过滤有效结果
+    valid_results = []
     for result in results:
-        movie = {}
         if not result:
-            print(result)
             continue
         subject = result.get("subject")
-        douban_title = subject.get("title")  # 豆瓣标题
+        douban_title = subject.get("title")
         db_url = subject.get("url")
         if not _match_title_filter(douban_title, only_titles):
             continue
         if not _match_db_url_filter(db_url, only_db_urls):
             continue
-        if limit and processed_count >= limit:
+        if limit and len(valid_results) >= limit:
             break
+        valid_results.append(result)
+
+    print(f"\n开始同步电影 (共 {len(valid_results)} 条)")
+    processed_count = 0
+    for result in tqdm(valid_results, desc="同步电影", unit="部"):
+        movie = {}
+        subject = result.get("subject")
+        douban_title = subject.get("title")  # 豆瓣标题
+        db_url = subject.get("url")
         processed_count += 1
         sync_stats["processed"] += 1
 
@@ -3938,31 +3951,48 @@ def _get_openlibrary_author_photo(author_name):
 
 
 def _get_book_cover(subject, title):
+    """获取书籍封面（并行尝试多个源）"""
     isbn = subject.get("isbn")
     isbn13 = subject.get("isbn13")
     authors = subject.get("author") or []
     author_name = authors[0] if authors else None
-    amazon_cover = get_amazon_cover(isbn=isbn, isbn13=isbn13)
-    if amazon_cover:
-        print(f"从Amazon获取封面成功: {title}")
-        return amazon_cover, "Amazon"
-    # Goodreads 封面在 Notion 中渲染稳定（通常可直接预览），优先于 GoogleBooks。
-    goodreads_cover = get_goodreads_cover(title, author=author_name, isbn=isbn)
-    if _is_valid_image_url(goodreads_cover):
-        return goodreads_cover, "Goodreads"
-    google_books_cover = get_google_books_cover(
-        isbn=isbn,
-        isbn13=isbn13,
-        title=title,
-        author=author_name,
-    )
-    if google_books_cover:
-        print(f"从GoogleBooks获取封面成功: {title}")
-        return google_books_cover, "GoogleBooks"
-    douban_cover = _get_douban_book_cover(subject)
-    if douban_cover:
-        return douban_cover, "Douban"
-    return _get_openlibrary_cover(isbn), "OpenLibrary"
+
+    # 定义封面源（按优先级排序）
+    cover_sources = [
+        ("Amazon", lambda: get_amazon_cover(isbn=isbn, isbn13=isbn13)),
+        ("Goodreads", lambda: get_goodreads_cover(title, author=author_name, isbn=isbn)),
+        ("GoogleBooks", lambda: get_google_books_cover(
+            isbn=isbn,
+            isbn13=isbn13,
+            title=title,
+            author=author_name,
+        )),
+        ("Douban", lambda: _get_douban_book_cover(subject)),
+        ("OpenLibrary", lambda: _get_openlibrary_cover(isbn)),
+    ]
+
+    # 并行尝试所有源，返回第一个成功的结果
+    with ThreadPoolExecutor(max_workers=min(len(cover_sources), COVER_FETCH_WORKERS)) as executor:
+        future_to_source = {
+            executor.submit(source_func): source_name
+            for source_name, source_func in cover_sources
+        }
+
+        # 按提交顺序等待结果，这样可以保持优先级
+        for future in as_completed(future_to_source):
+            source_name = future_to_source[future]
+            try:
+                result = future.result()
+                if result and _is_valid_image_url(result):
+                    print(f"从{source_name}获取封面成功: {title}")
+                    return result, source_name
+            except Exception as e:
+                print(f"  {source_name}获取封面失败: {str(e)[:50]}")
+                continue
+
+    # 所有源都失败
+    print(f"  所有封面源都失败: {title}")
+    return None, None
 
 
 def _extract_book_year(subject):
@@ -4271,9 +4301,10 @@ def insert_book(
     results = []
     for status_key in book_status.keys():
         results.extend(fetch_subjects(douban_name, "book", status_key, recent_days=recent_days))
-    processed_count = 0
+
+    # 过滤有效结果
+    valid_results = []
     for result in results:
-        book = {}
         if not result:
             continue
         subject = result.get("subject") or {}
@@ -4283,13 +4314,22 @@ def insert_book(
             continue
         if not _match_db_url_filter(db_url, only_db_urls):
             continue
-        if limit and processed_count >= limit:
+        if limit and len(valid_results) >= limit:
             break
-        processed_count += 1
-        sync_stats["processed"] += 1
         if not db_url:
             print(f"跳过缺少DB_Url的图书条目: {title}")
             continue
+        valid_results.append(result)
+
+    print(f"\n开始同步图书 (共 {len(valid_results)} 条)")
+    processed_count = 0
+    for result in tqdm(valid_results, desc="同步图书", unit="本"):
+        book = {}
+        subject = result.get("subject") or {}
+        db_url = subject.get("url")
+        title = subject.get("title")
+        processed_count += 1
+        sync_stats["processed"] += 1
 
         create_time = pendulum.parse(result.get("create_time"), tz=utils.tz)
         create_time = create_time.replace(second=0)

@@ -16,11 +16,13 @@ from douban2notion.douban import (
 )
 from douban2notion.notion_helper import NotionHelper
 from douban2notion.utils import get_property_value
+from douban2notion.cache_manager import cache_manager
 
 
 load_dotenv()
 
-URL_VALIDATION_CACHE: Dict[str, bool] = {}
+# 使用统一的缓存管理器
+URL_VALIDATION_CACHE = cache_manager.get_cache("data_audit_url_validation")
 
 ISSUE_MISSING_IMDB = "MissingIMDB"
 ISSUE_INVALID_IMDB = "InvalidIMDB"
@@ -317,8 +319,12 @@ def _is_valid_image_url(url: Optional[str], check_remote: bool) -> bool:
         return False
     if not check_remote:
         return True
-    if url in URL_VALIDATION_CACHE:
-        return URL_VALIDATION_CACHE[url]
+
+    # 先检查缓存
+    cached_result = cache_manager.get("data_audit_url_validation", url)
+    if cached_result is not None:
+        return cached_result
+
     try:
         response = requests.get(
             url,
@@ -331,7 +337,8 @@ def _is_valid_image_url(url: Optional[str], check_remote: bool) -> bool:
         ok = response.status_code == 200 and "image/" in content_type
     except Exception:
         ok = False
-    URL_VALIDATION_CACHE[url] = ok
+
+    cache_manager.set("data_audit_url_validation", url, ok)
     return ok
 
 
