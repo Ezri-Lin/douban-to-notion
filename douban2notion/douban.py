@@ -3634,6 +3634,9 @@ def get_goodreads_rating(isbn):
 def _is_valid_image_url(url):
     if not url:
         return False
+    # 豆瓣图片URL直接信任（doubanio.com对云端IP返回418反爬，但URL本身有效）
+    if "doubanio.com" in url:
+        return True
     if url in COVER_URL_VALIDITY_CACHE:
         return COVER_URL_VALIDITY_CACHE[url]
     try:
@@ -3949,17 +3952,13 @@ def get_google_books_cover(isbn=None, isbn13=None, title=None, author=None):
 
 def _get_douban_book_cover(subject):
     pic = subject.get("pic") or {}
-    candidates = []
+    # 豆瓣API返回的封面URL直接信任，不做HTTP验证
+    # 原因：doubanio.com图片服务器对云端IP返回418反爬，但URL本身有效
     for key in ("large", "normal", "small"):
         url = pic.get(key)
-        if not url:
-            continue
-        # 先试原链接，再试webp变体，兼容豆瓣图片迁移
-        candidates.append(url)
-        webp_url = _to_webp_variant(url)
-        if webp_url != url:
-            candidates.append(webp_url)
-    return _pick_first_valid_cover(candidates)
+        if url:
+            return url
+    return None
 
 
 def _get_openlibrary_cover(isbn):
@@ -4043,7 +4042,13 @@ def _get_book_cover(subject, title):
             source_name = future_to_source[future]
             try:
                 result = future.result()
-                if result and _is_valid_image_url(result):
+                if not result:
+                    continue
+                # 豆瓣API返回的URL直接信任（doubanio.com对云端IP返回418反爬，但URL有效）
+                if source_name == "Douban" and "doubanio.com" in result:
+                    print(f"从{source_name}获取封面成功: {title}")
+                    return result, source_name
+                if _is_valid_image_url(result):
                     print(f"从{source_name}获取封面成功: {title}")
                     return result, source_name
             except Exception as e:

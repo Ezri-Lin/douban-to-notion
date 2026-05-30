@@ -50,6 +50,10 @@ def is_valid_image_url(url: Optional[str]) -> bool:
     if not url:
         return False
 
+    # 豆瓣图片URL直接信任（doubanio.com对云端IP返回418反爬，但URL本身有效）
+    if "doubanio.com" in url:
+        return True
+
     # 先检查缓存
     cached_result = cache_manager.get("url_validation", url)
     if cached_result is not None:
