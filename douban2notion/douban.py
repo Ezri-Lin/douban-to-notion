@@ -219,14 +219,19 @@ def _extract_subject_countries(subject):
 
 
 @retry(stop_max_attempt_number=3, wait_fixed=5000)
-def fetch_subjects(user, type_, status, recent_days=0):
+def fetch_subjects(user, type_, status, recent_days=0, since=None):
     offset = 0
     page = 0
     url = f"https://{DOUBAN_API_HOST}/api/v2/user/{user}/interests"
     total = 0
     results = []
     cutoff_time = None
-    if recent_days and recent_days > 0:
+    if since:
+        try:
+            cutoff_time = pendulum.parse(since, tz=utils.tz)
+        except Exception:
+            pass
+    if cutoff_time is None and recent_days and recent_days > 0:
         cutoff_time = pendulum.now(tz=utils.tz).subtract(days=recent_days)
     while True:
         params = {
@@ -526,6 +531,7 @@ def insert_movie(
     only_db_urls=None,
     limit=0,
     recent_days=0,
+    since=None,
     existing_only=False,
     dedupe_duplicates=False,
     dedupe_only=False,
@@ -611,7 +617,7 @@ def insert_movie(
             return
     results = []
     for i in movie_status.keys():
-        results.extend(fetch_subjects(douban_name, "movie", i, recent_days=recent_days))
+        results.extend(fetch_subjects(douban_name, "movie", i, recent_days=recent_days, since=since))
 
     # 过滤有效结果
     valid_results = []
@@ -930,7 +936,7 @@ def insert_movie(
                             movie["Name"] = clean_douban_title
                     movie["MovieName"] = clean_douban_title
 
-            if repair_flags.get("rating") and imdb_info and _has_rating_value(imdb_info.get("rating")):
+            if imdb_info and _has_rating_value(imdb_info.get("rating")):
                 movie["IMDBRating"] = imdb_info["rating"]
             if repair_flags.get("cover"):
                 resolved_cover, resolved_cover_source, resolved_cover_status = _resolve_cover_from_sources(
@@ -1138,27 +1144,37 @@ def insert_movie(
                     notion_helper,
                 )
 
-            # ── 判断是否有实质变化需要更新 ───────────────────────────
-            current_name = notion_movive.get("Name")
-            needs_update = (
-                basic_changed
-                or ("Name" in movie and current_name != movie.get("Name"))
-                or ("MovieName" in movie and notion_movive.get("MovieName") != movie.get("MovieName"))
-                or ("Season" in movie and notion_movive.get("Season") != movie.get("Season"))
-                or ("Cover" in movie and notion_movive.get("Cover") != movie.get("Cover"))
-                or ("CoverSource" in movie and notion_movive.get("CoverSource") != movie.get("CoverSource"))
-                or ("CoverStatus" in movie and notion_movive.get("CoverStatus") != movie.get("CoverStatus"))
-                or ("IMDB" in movie and notion_movive.get("IMDB") != movie.get("IMDB"))
-                or ("IMDB_Url" in movie and notion_movive.get("IMDB_Url") != movie.get("IMDB_Url"))
-                or ("IMDBRating" in movie and notion_movive.get("IMDBRating") != movie.get("IMDBRating"))
-                or ("Actor" in movie and _normalize_relation_ids(notion_movive.get("Actor")) != _normalize_relation_ids(movie.get("Actor")))
-                or ("Director" in movie and _normalize_relation_ids(notion_movive.get("Director")) != _normalize_relation_ids(movie.get("Director")))
-                or (
-                    "DataIssue" in movie
-                    and _normalize_data_issue_names(notion_movive.get("DataIssue"))
-                    != _normalize_data_issue_names(movie.get("DataIssue"))
-                )
-            )
+            # ── 刷新IMDB评分（每次同步都更新） ──────────────────────
+            if not movie.get("IMDBRating") and notion_movive.get("IMDB"):
+                notion_imdb_id = _normalize_imdb_id(notion_movive.get("IMDB"))
+                if notion_imdb_id:
+                    try:
+                        refreshed_info = get_imdb_info(notion_imdb_id)
+                        if refreshed_info and _has_rating_value(refreshed_info.get("rating")):
+                            movie["IMDBRating"] = refreshed_info["rating"]
+                    except Exception:
+                        pass
+
+            # ── 收集实际变化的字段（避免无效全量更新） ──────────────
+            changed_fields = {}
+            for key in movie:
+                if key.startswith("_"):
+                    continue
+                new_val = movie[key]
+                old_val = notion_movive.get(key)
+                if key in ("Actor", "Director"):
+                    new_val = _normalize_relation_ids(new_val)
+                    old_val = _normalize_relation_ids(old_val)
+                elif key == "DataIssue":
+                    new_val = _normalize_data_issue_names(new_val)
+                    old_val = _normalize_data_issue_names(old_val)
+                # 跳过空值：不因豆瓣未返回某字段就清空Notion已有值
+                if new_val is None or new_val == [] or new_val == "":
+                    continue
+                if new_val != old_val:
+                    changed_fields[key] = movie[key]
+
+            needs_update = basic_changed or bool(changed_fields)
 
             if needs_update:
                 # 清理临时字段
@@ -1167,17 +1183,20 @@ def insert_movie(
                 movie.pop("_alias_titles", None)
                 movie.pop("_is_chinese", None)
 
-                # 保护策略：当本轮抓取不到 IMDB 相关值时，不覆盖 Notion 已有值。
-                # 仅在拿到明确新值时更新，避免“已有 IMDB 被清空”。
-                properties = utils.get_properties(movie, movie_properties_type_dict)
+                # 只发送实际变化的属性，避免Notion last_edited无意义更新
+                if changed_fields:
+                    properties = utils.get_properties(changed_fields, movie_properties_type_dict)
+                else:
+                    properties = utils.get_properties(movie, movie_properties_type_dict)
                 movie_display = f"{movie.get('Name', notion_movive.get('Name') or 'N/A')}"
                 if movie.get("MovieName"):
                     movie_display += f" / {movie.get('MovieName')}"
-                print(f"更新: {movie_display}")
+                changed_keys = list(changed_fields.keys()) if changed_fields else ["(light)"]
+                print(f"更新: {movie_display} [{', '.join(changed_keys)}]")
                 notion_helper.get_date_relation(properties, create_time)
 
                 icon = None
-                if movie.get("Cover"):
+                if changed_fields.get("Cover") and movie.get("Cover"):
                     icon = get_icon(movie.get("Cover"))
 
                 notion_helper.update_page(
@@ -1604,7 +1623,7 @@ def insert_movie(
                 else:
                     if not imdb_id:
                         print(f"  外文条目未获取到IMDB，跳过演员/导演写入，避免中文音译污染")
-                    # 外文条目在无IMDB时不再回退豆瓣，避免写入“xxx·xxx”中文音译人名
+                    # 外文条目在无IMDB时不再回退豆瓣，避免写入"xxx·xxx"中文音译人名
                     if not movie.get("Director") and subject.get("directors"):
                         fallback_director_names = _pick_relation_names(
                             subject.get("directors"),
@@ -3594,23 +3613,14 @@ def get_goodreads_cover(title, author=None, isbn=None):
     return None
 
 
-def get_goodreads_rating(isbn):
-    """通过 ISBN 获取 Goodreads 评分"""
-    if not isbn:
-        return None
-
-    # 使用缓存
-    cache_key = f"goodreads_rating_{isbn}"
-    if cache_key in IMDB_INFO_CACHE:
-        return IMDB_INFO_CACHE[cache_key]
-
+def _fetch_goodreads_rating(isbn):
+    """从 Goodreads 网页爬取评分（不稳定，可能被反爬）"""
     url = f"https://www.goodreads.com/book/isbn/{isbn}"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
     }
-
     try:
         response = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
         if response.ok:
@@ -3618,17 +3628,86 @@ def get_goodreads_rating(isbn):
             rating_div = soup.find('div', class_='RatingStatistics__rating')
             if rating_div:
                 rating_text = rating_div.text.strip()
-                try:
-                    rating = float(rating_text)
-                    IMDB_INFO_CACHE[cache_key] = rating
-                    return rating
-                except ValueError:
-                    pass
-    except Exception as e:
-        print(f"  获取 Goodreads 评分失败 ({isbn}): {str(e)[:50]}")
-
-    IMDB_INFO_CACHE[cache_key] = None
+                return float(rating_text)
+    except Exception:
+        pass
     return None
+
+
+def _fetch_amazon_rating(isbn):
+    """从 Amazon 商品页爬取 Goodreads 评分（Amazon 展示的也是 Goodreads 数据）"""
+    url = f"https://www.amazon.com/isbn/{isbn}"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        if response.ok:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            # Amazon 在书籍页面展示 Goodreads 评分，通常在 id 为 "goodreads" 相关的区域
+            for tag in soup.find_all(['span', 'div', 'a'], string=re.compile(r'Goodreads')):
+                parent = tag.find_parent()
+                if parent:
+                    rating_match = re.search(r'(\d\.\d)\s*(?:out of|/)\s*5', parent.get_text())
+                    if rating_match:
+                        return float(rating_match.group(1))
+            # 兜底：查找 aGrRg（Amazon Goodreads Rating）相关元素
+            gr_section = soup.find('div', id=lambda x: x and 'gr_' in str(x))
+            if gr_section:
+                rating_match = re.search(r'(\d\.\d)', gr_section.get_text())
+                if rating_match:
+                    return float(rating_match.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def _fetch_google_books_rating(isbn):
+    """从 Google Books API 获取评分（免费、稳定）"""
+    url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}"
+    try:
+        response = requests.get(url, timeout=15)
+        if response.ok:
+            items = response.json().get("items") or []
+            if items:
+                volume_info = items[0].get("volumeInfo") or {}
+                rating = volume_info.get("averageRating")
+                if rating:
+                    return float(rating)
+    except Exception:
+        pass
+    return None
+
+
+def get_goodreads_rating(isbn):
+    """通过 ISBN 获取书籍评分（Goodreads → Amazon → Google Books 降级）"""
+    if not isbn:
+        return None
+
+    cache_key = f"goodreads_rating_{isbn}"
+    if cache_key in IMDB_INFO_CACHE:
+        return IMDB_INFO_CACHE[cache_key]
+
+    # 1. Goodreads 直接爬取
+    rating = _fetch_goodreads_rating(isbn)
+    source = "Goodreads"
+
+    # 2. Amazon（展示的也是 Goodreads 数据）
+    if not rating:
+        rating = _fetch_amazon_rating(isbn)
+        source = "Amazon"
+
+    # 3. Google Books API（不同的评分体系，但聊胜于无）
+    if not rating:
+        rating = _fetch_google_books_rating(isbn)
+        source = "GoogleBooks"
+
+    if rating:
+        print(f"  {source}评分: {rating}")
+    IMDB_INFO_CACHE[cache_key] = rating
+    return rating
 
 
 def _is_valid_image_url(url):
@@ -4291,6 +4370,7 @@ def insert_book(
     only_db_urls=None,
     limit=0,
     recent_days=0,
+    since=None,
     existing_only=False,
     dedupe_duplicates=False,
     dedupe_only=False,
@@ -4366,7 +4446,7 @@ def insert_book(
     print(f"notion {len(notion_book_dict)}")
     results = []
     for status_key in book_status.keys():
-        results.extend(fetch_subjects(douban_name, "book", status_key, recent_days=recent_days))
+        results.extend(fetch_subjects(douban_name, "book", status_key, recent_days=recent_days, since=since))
 
     # 过滤有效结果
     valid_results = []
@@ -4465,7 +4545,6 @@ def insert_book(
             goodreads_rating = get_goodreads_rating(isbn)
             if goodreads_rating:
                 book["GoodreadsRating"] = goodreads_rating
-                print(f"  Goodreads评分: {goodreads_rating}")
 
         year = _extract_book_year(subject)
         if year:
@@ -4508,43 +4587,36 @@ def insert_book(
             ):
                 book["Raters"] = existing_book.get("Raters")
 
-            needs_update = (
-                existing_book.get("Name") != book.get("Name")
-                or existing_book.get("Date") != book.get("Date")
-                or existing_book.get("Status") != book.get("Status")
-                or ("Remark" in book and existing_book.get("Remark") != book.get("Remark"))
-                or ("Rating" in book and existing_book.get("Rating") != book.get("Rating"))
-                or ("Cover" in book and existing_book.get("Cover") != book.get("Cover"))
-                or ("CoverStatus" in book and existing_book.get("CoverStatus") != book.get("CoverStatus"))
-                or ("CoverSource" in book and existing_book.get("CoverSource") != book.get("CoverSource"))
-                or ("ISBN" in book and existing_book.get("ISBN") != book.get("ISBN"))
-                or ("ISBN_13" in book and existing_book.get("ISBN_13") != book.get("ISBN_13"))
-                or ("GD_Url" in book and existing_book.get("GD_Url") != book.get("GD_Url"))
-                or ("Intro" in book and existing_book.get("Intro") != book.get("Intro"))
-                or ("DoubanRating" in book and existing_book.get("DoubanRating") != book.get("DoubanRating"))
-                or ("Raters" in book and existing_book.get("Raters") != book.get("Raters"))
-                or ("Year" in book and existing_book.get("Year") != book.get("Year"))
-                or (
-                    "Author" in book
-                    and existing_book.get("Author") != _normalize_relation_ids(book.get("Author"))
-                )
-                or (
-                    "Category" in book
-                    and existing_book.get("Category") != _normalize_relation_ids(book.get("Category"))
-                )
-                or (
-                    "Publisher" in book
-                    and existing_book.get("Publisher") != _normalize_multi_select_names(book.get("Publisher"))
-                )
-            )
+            # ── 收集实际变化的字段（避免无效全量更新） ──────────────
+            changed_fields = {}
+            for key in book:
+                if key.startswith("_"):
+                    continue
+                new_val = book[key]
+                old_val = existing_book.get(key)
+                if key in ("Author", "Category"):
+                    new_val = _normalize_relation_ids(new_val)
+                    old_val = _normalize_relation_ids(old_val)
+                elif key == "Publisher":
+                    new_val = _normalize_multi_select_names(new_val)
+                    old_val = _normalize_multi_select_names(old_val)
+                # 跳过空值：不因豆瓣未返回某字段就清空Notion已有值
+                if new_val is None or new_val == [] or new_val == "":
+                    continue
+                if new_val != old_val:
+                    changed_fields[key] = book[key]
+
+            needs_update = bool(changed_fields)
+
             if needs_update:
                 sync_stats["pending_update"] += 1
                 if dry_run:
                     continue
-                print(f"更新{book.get('Name')}")
-                properties = utils.get_properties(book, book_properties_type_dict)
+                properties = utils.get_properties(changed_fields, book_properties_type_dict)
+                changed_keys = list(changed_fields.keys())
+                print(f"更新: {book.get('Name')} [{', '.join(changed_keys)}]")
                 notion_helper.get_date_relation(properties, create_time)
-                icon = get_icon(book.get("Cover")) if book.get("Cover") else None
+                icon = get_icon(book.get("Cover")) if changed_fields.get("Cover") and book.get("Cover") else None
                 notion_helper.update_page(
                     page_id=existing_book.get("page_id"),
                     properties=properties,
@@ -4620,6 +4692,7 @@ def main():
     parser.add_argument("--only-db-url", action="append", default=[], help="仅同步指定豆瓣条目（支持完整URL/subject id），可重复传入")
     parser.add_argument("--limit", type=int, default=0, help="最多处理条目数（0表示不限制）")
     parser.add_argument("--recent-days", type=int, default=0, help="仅处理最近N天新增/更新的豆瓣条目（0表示不限制）")
+    parser.add_argument("--since", type=str, default=None, help="仅同步该时间戳之后的条目 (ISO格式，如 2025-05-25T00:00:00+08:00)")
     parser.add_argument("--existing-only", action="store_true", help="仅更新Notion中已存在条目，不新增页面")
     parser.add_argument("--dedupe-duplicates", action="store_true", help="按DB_Url归档重复页面，只保留最佳条目")
     parser.add_argument("--dedupe-only", action="store_true", help="仅执行重复页归档，不拉取豆瓣数据")
@@ -4647,6 +4720,7 @@ def main():
             only_db_urls=options.only_db_url,
             limit=options.limit,
             recent_days=options.recent_days,
+            since=options.since,
             existing_only=options.existing_only,
             dedupe_duplicates=options.dedupe_duplicates,
             dedupe_only=options.dedupe_only,
@@ -4660,6 +4734,7 @@ def main():
             only_db_urls=options.only_db_url,
             limit=options.limit,
             recent_days=options.recent_days,
+            since=options.since,
             existing_only=options.existing_only,
             dedupe_duplicates=options.dedupe_duplicates,
             dedupe_only=options.dedupe_only,

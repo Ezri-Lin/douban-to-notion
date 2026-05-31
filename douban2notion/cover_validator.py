@@ -21,7 +21,6 @@ from douban2notion.performance_monitor import timing, Timer
 load_dotenv()
 
 # 使用统一的缓存管理器
-URL_VALIDATION_CACHE = cache_manager.get_cache("url_validation")
 AUTHOR_NAME_CACHE = cache_manager.get_cache("author_name")
 OPENLIB_AUTHOR_PHOTO_CACHE = cache_manager.get_cache("openlib_author_photo")
 DEFAULT_USER_ICON_URL = "https://www.notion.so/icons/user-circle-filled_gray.svg"
@@ -55,7 +54,7 @@ def is_valid_image_url(url: Optional[str]) -> bool:
         return True
 
     # 先检查缓存
-    cached_result = cache_manager.get("url_validation", url)
+    cached_result = cache_manager.get("data_audit_url_validation", url)
     if cached_result is not None:
         return cached_result
 
@@ -65,7 +64,7 @@ def is_valid_image_url(url: Optional[str]) -> bool:
         ok = False
 
     # 线程安全地写入缓存
-    cache_manager.set("url_validation", url, ok)
+    cache_manager.set("data_audit_url_validation", url, ok)
     return ok
 
 
@@ -80,7 +79,7 @@ def batch_validate_urls(urls: List[str], max_workers: int = MAX_URL_WORKERS) -> 
 
     # 如果所有URL都在缓存中，直接返回
     if not urls_to_check:
-        return {url: cache_manager.get("url_validation", url, False) for url in urls}
+        return {url: cache_manager.get("data_audit_url_validation", url, False) for url in urls}
 
     # 并行验证URL
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -95,7 +94,7 @@ def batch_validate_urls(urls: List[str], max_workers: int = MAX_URL_WORKERS) -> 
     # 合并缓存中的结果
     for url in urls:
         if url not in results:
-            results[url] = cache_manager.get("url_validation", url, False)
+            results[url] = cache_manager.get("data_audit_url_validation", url, False)
 
     return results
 
@@ -297,7 +296,7 @@ def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bo
 
     if valid:
         update_check_fields(
-            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok", update_checked_at=False
+            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok"
         )
         remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
         return True, False  # checked, fixed
@@ -306,7 +305,7 @@ def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bo
     if not imdb_id:
         status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
         update_check_fields(
-            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status, update_checked_at=False
+            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status
         )
         return True, False
 
@@ -315,7 +314,7 @@ def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bo
     if not new_cover or not is_valid_image_url(new_cover):
         status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
         update_check_fields(
-            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status, update_checked_at=False
+            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status
         )
         return True, False
 
@@ -329,7 +328,6 @@ def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bo
             "CoverSource",
             "Ok",
             "IMDB",
-            update_checked_at=False,
         )
         remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
         return True, True  # checked, fixed
@@ -337,14 +335,38 @@ def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bo
         return True, False
 
 
+def _query_needing_repair(nh: NotionHelper, database_id: str, status_field: str) -> List[Dict]:
+    """只查询状态为 Missing 或 Broken 的条目，避免全量扫描"""
+    filter_payload = {
+        "or": [
+            {"property": status_field, "select": {"equals": "Missing"}},
+            {"property": status_field, "select": {"equals": "Broken"}},
+        ]
+    }
+    results = []
+    has_more = True
+    start_cursor = None
+    while has_more:
+        response = nh.client.databases.query(
+            database_id=database_id,
+            filter=filter_payload,
+            start_cursor=start_cursor,
+            page_size=100,
+        )
+        start_cursor = response.get("next_cursor")
+        has_more = response.get("has_more")
+        results.extend(response.get("results"))
+    return results
+
+
 @timing
 def validate_movie_covers(nh: NotionHelper, max_workers: int = MAX_WORKERS):
-    """并行验证电影封面"""
-    pages = nh.query_all(database_id=nh.movie_database_id)
+    """并行验证电影封面（仅查 Missing/Broken）"""
+    pages = _query_needing_repair(nh, nh.movie_database_id, "CoverStatus")
     fixed = 0
     checked = 0
 
-    print(f"[Movie] 开始验证 {len(pages)} 个电影封面 (并发数: {max_workers})")
+    print(f"[Movie] 开始验证 {len(pages)} 个需修复的电影封面 (并发数: {max_workers})")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_page = {
@@ -382,7 +404,7 @@ def _validate_single_book_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, boo
 
     if valid:
         update_check_fields(
-            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok", update_checked_at=False
+            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok"
         )
         remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
         return True, False
@@ -400,7 +422,7 @@ def _validate_single_book_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, boo
     if not new_cover:
         status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
         update_check_fields(
-            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status, update_checked_at=False
+            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status
         )
         return True, False
 
@@ -414,7 +436,6 @@ def _validate_single_book_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, boo
             "CoverSource",
             "Ok",
             source,
-            update_checked_at=False,
         )
         remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
         return True, True
@@ -450,12 +471,12 @@ def _get_book_cover_parallel(title: str, author_name: Optional[str], isbn: Optio
 
 @timing
 def validate_book_covers(nh: NotionHelper, max_workers: int = MAX_WORKERS):
-    """并行验证书籍封面"""
-    pages = nh.query_all(database_id=nh.book_database_id)
+    """并行验证书籍封面（仅查 Missing/Broken）"""
+    pages = _query_needing_repair(nh, nh.book_database_id, "CoverStatus")
     fixed = 0
     checked = 0
 
-    print(f"[Book] 开始验证 {len(pages)} 个书籍封面 (并发数: {max_workers})")
+    print(f"[Book] 开始验证 {len(pages)} 个需修复的书籍封面 (并发数: {max_workers})")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_page = {
@@ -496,7 +517,7 @@ def _validate_single_person_photo(nh: NotionHelper, page: Dict, has_photo_proper
 
     if urls_to_validate:
         validation_results = batch_validate_urls(urls_to_validate, max_workers=3)
-        valid_photo = validation_results.get(prop_photo, False) if has_photo_property and prop_photo else True
+        valid_photo = validation_results.get(prop_photo, False) if has_photo_property and prop_photo else False
         valid_icon = validation_results.get(icon_url, False) if icon_url else False
         valid_cover = validation_results.get(cover_url, False) if cover_url else False
     else:
@@ -560,7 +581,7 @@ def _validate_single_person_photo(nh: NotionHelper, page: Dict, has_photo_proper
 
 @timing
 def validate_people_photos(nh: NotionHelper, db_id: str, label: str, imdb_enabled: bool, max_workers: int = MAX_WORKERS):
-    """并行验证人物照片"""
+    """并行验证人物照片（仅查 Missing/Broken）"""
     if not db_id:
         print(f"[{label}] skipped (db not found)")
         return
@@ -569,11 +590,11 @@ def validate_people_photos(nh: NotionHelper, db_id: str, label: str, imdb_enable
     has_photo_property = "Photo" in (schema.get("properties") or {})
     has_imdb_property = "IMDB" in (schema.get("properties") or {})
 
-    pages = nh.query_all(database_id=db_id)
+    pages = _query_needing_repair(nh, db_id, "PhotoStatus")
     fixed = 0
     checked = 0
 
-    print(f"[{label}] 开始验证 {len(pages)} 个人物照片 (并发数: {max_workers})")
+    print(f"[{label}] 开始验证 {len(pages)} 个需修复的人物照片 (并发数: {max_workers})")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_page = {

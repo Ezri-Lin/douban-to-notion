@@ -33,8 +33,23 @@ jobs:
           pip install -r requirements.txt
       - name: Validate import
         run: python -m compileall douban2notion
+      - name: Restore last sync timestamp
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-timestamp
+          path: .
+        continue-on-error: true
+      - name: Set sync-since
+        run: |
+          if [ -f last_success_time.txt ]; then
+            echo "SYNC_SINCE=$(cat last_success_time.txt)" >> $GITHUB_ENV
+            echo "从上次成功时间同步: $(cat last_success_time.txt)"
+          else
+            echo "SYNC_SINCE=" >> $GITHUB_ENV
+            echo "首次运行：全量同步"
+          fi
       - name: Sync book
-        run: python -m douban2notion.douban book
+        run: python -m douban2notion.douban book ${SYNC_SINCE:+--since "$SYNC_SINCE"}
 
   movie_sync:
     name: Sync Movie
@@ -62,5 +77,36 @@ jobs:
           pip install -r requirements.txt
       - name: Validate import
         run: python -m compileall douban2notion
+      - name: Restore last sync timestamp
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-timestamp
+          path: .
+        continue-on-error: true
+      - name: Set sync-since
+        run: |
+          if [ -f last_success_time.txt ]; then
+            echo "SYNC_SINCE=$(cat last_success_time.txt)" >> $GITHUB_ENV
+            echo "从上次成功时间同步: $(cat last_success_time.txt)"
+          else
+            echo "SYNC_SINCE=" >> $GITHUB_ENV
+            echo "首次运行：全量同步"
+          fi
       - name: Sync movie
-        run: python -m douban2notion.douban movie --dedupe-duplicates --recent-days 3
+        run: python -m douban2notion.douban movie --dedupe-duplicates ${SYNC_SINCE:+--since "$SYNC_SINCE"}
+
+  save-timestamp:
+    name: Save Sync Timestamp
+    runs-on: ubuntu-latest
+    needs: [book_sync, movie_sync]
+    if: success()
+    steps:
+      - name: Record success time
+        run: date -u +%Y-%m-%dT%H:%M:%SZ > last_success_time.txt
+      - name: Save timestamp artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-timestamp
+          path: last_success_time.txt
+          retention-days: 90
+          overwrite: true
