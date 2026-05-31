@@ -208,6 +208,32 @@ def get_openlibrary_book_cover(isbn: Optional[str]) -> Optional[str]:
     return None
 
 
+def get_google_books_cover(isbn: Optional[str]) -> Optional[str]:
+    """从Google Books API获取封面"""
+    if not isbn:
+        return None
+    try:
+        response = requests.get(
+            "https://www.googleapis.com/books/v1/volumes",
+            params={"q": f"isbn:{isbn}", "maxResults": 1},
+            timeout=10,
+        )
+        if response.status_code != 200:
+            return None
+        items = response.json().get("items") or []
+        if not items:
+            return None
+        image_links = (items[0].get("volumeInfo") or {}).get("imageLinks") or {}
+        # 优先使用thumbnail（较大），其次smallThumbnail
+        url = image_links.get("thumbnail") or image_links.get("smallThumbnail")
+        if url:
+            # Google Books返回的URL可能是http，转为https
+            url = url.replace("http://", "https://")
+        return url if url and is_valid_image_url(url) else None
+    except Exception:
+        return None
+
+
 @retry_on_exception(max_retries=2, delay=0.5, backoff=2.0)
 def _fetch_openlibrary_author_photo(author_name: str) -> Optional[str]:
     """从OpenLibrary获取作者照片（带重试）"""
@@ -449,6 +475,7 @@ def _get_book_cover_parallel(title: str, author_name: Optional[str], isbn: Optio
     cover_sources = [
         ("Goodreads", lambda: get_goodreads_cover(title, author=author_name, isbn=isbn)),
         ("OpenLibrary", lambda: get_openlibrary_book_cover(isbn)),
+        ("GoogleBooks", lambda: get_google_books_cover(isbn)),
     ]
 
     with ThreadPoolExecutor(max_workers=len(cover_sources)) as executor:
