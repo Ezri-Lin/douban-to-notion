@@ -195,51 +195,188 @@ def remove_data_issue_tags(client, page, tags_to_remove):
     )
 
 
-def get_openlibrary_book_cover(isbn: Optional[str]) -> Optional[str]:
-    if not isbn:
-        print(f"    📚 OpenLibrary: ✗ 无ISBN")
-        return None
-    candidates = [
-        f"https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg?default=false",
-        f"https://covers.openlibrary.org/b/isbn/{isbn}-M.jpg?default=false",
-    ]
-    for url in candidates:
-        if is_valid_image_url(url):
-            return url
-    print(f"    📚 OpenLibrary: ✗ ISBN={isbn} 封面无效")
+def get_openlibrary_book_cover(isbn: Optional[str], title: Optional[str] = None, author: Optional[str] = None) -> Optional[str]:
+    """从OpenLibrary获取书籍封面（ISBN优先，其次标题搜索）"""
+    # 1. 尝试ISBN直接查询
+    if isbn:
+        candidates = [
+            f"https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg?default=false",
+            f"https://covers.openlibrary.org/b/isbn/{isbn}-M.jpg?default=false",
+        ]
+        for url in candidates:
+            if is_valid_image_url(url):
+                return url
+
+    # 2. 通过标题搜索OpenLibrary
+    if title:
+        try:
+            search_params = {"title": title, "limit": 3}
+            if author:
+                search_params["author"] = author
+            response = requests.get(
+                "https://openlibrary.org/search.json",
+                params=search_params,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=15,
+            )
+            if response.status_code == 200:
+                for doc in (response.json().get("docs") or []):
+                    cover_i = doc.get("cover_i")
+                    if cover_i:
+                        url = f"https://covers.openlibrary.org/b/id/{cover_i}-L.jpg?default=false"
+                        if is_valid_image_url(url):
+                            return url
+        except Exception:
+            pass
+
+    if isbn:
+        print(f"    📚 OpenLibrary: ✗ ISBN={isbn} 封面无效")
+    else:
+        print(f"    📚 OpenLibrary: ✗ 无ISBN，标题搜索未找到")
     return None
 
 
-def get_google_books_cover(isbn: Optional[str]) -> Optional[str]:
-    """从Google Books API获取封面"""
-    if not isbn:
-        print(f"    📚 GoogleBooks: ✗ 无ISBN")
+def get_google_books_cover(isbn: Optional[str] = None, title: Optional[str] = None, author: Optional[str] = None) -> Optional[str]:
+    """从Google Books API获取封面（ISBN优先，其次标题+作者搜索）"""
+    # 1. 尝试ISBN搜索
+    if isbn:
+        try:
+            response = requests.get(
+                "https://www.googleapis.com/books/v1/volumes",
+                params={"q": f"isbn:{isbn}", "maxResults": 1},
+                timeout=10,
+            )
+            if response.status_code == 200:
+                items = response.json().get("items") or []
+                if items:
+                    url = _extract_google_books_cover(items[0])
+                    if url:
+                        return url
+            elif response.status_code == 429:
+                print(f"    📚 GoogleBooks: ✗ HTTP 429 限流")
+                return None
+        except Exception:
+            pass
+
+    # 2. 通过标题+作者搜索
+    if title:
+        try:
+            query = f"intitle:{title}"
+            if author:
+                query += f"+inauthor:{author}"
+            response = requests.get(
+                "https://www.googleapis.com/books/v1/volumes",
+                params={"q": query, "maxResults": 5},
+                timeout=10,
+            )
+            if response.status_code == 200:
+                for item in (response.json().get("items") or []):
+                    url = _extract_google_books_cover(item)
+                    if url:
+                        return url
+            elif response.status_code == 429:
+                print(f"    📚 GoogleBooks: ✗ HTTP 429 限流")
+                return None
+        except Exception:
+            pass
+
+    print(f"    📚 GoogleBooks: ✗ 未找到可用封面")
+    return None
+
+
+def _extract_google_books_cover(item: dict) -> Optional[str]:
+    """从Google Books API结果中提取封面URL"""
+    image_links = (item.get("volumeInfo") or {}).get("imageLinks") or {}
+    for key in ["extraLarge", "large", "medium", "small", "thumbnail", "smallThumbnail"]:
+        url = image_links.get(key)
+        if url:
+            url = url.replace("http://", "https://")
+            if is_valid_image_url(url):
+                return url
+    return None
+
+
+def get_wikidata_person_photo(name: str) -> Optional[str]:
+    """从Wikidata获取人物照片（通过中文名搜索）"""
+    if not name:
         return None
+
+    cached = cache_manager.get("wikidata_person_photo", name)
+    if cached is not None:
+        return cached
+
     try:
-        response = requests.get(
-            "https://www.googleapis.com/books/v1/volumes",
-            params={"q": f"isbn:{isbn}", "maxResults": 1},
+        # 1. 搜索Wikidata实体
+        search_url = "https://www.wikidata.org/w/api.php"
+        search_resp = requests.get(
+            search_url,
+            params={
+                "action": "wbsearchentities",
+                "search": name,
+                "language": "zh",
+                "limit": 5,
+                "format": "json",
+            },
+            headers={"User-Agent": "Mozilla/5.0"},
             timeout=10,
         )
-        if response.status_code != 200:
-            print(f"    📚 GoogleBooks: ✗ HTTP {response.status_code}")
+        if search_resp.status_code != 200:
+            cache_manager.set("wikidata_person_photo", name, None)
             return None
-        items = response.json().get("items") or []
-        if not items:
-            print(f"    📚 GoogleBooks: ✗ ISBN={isbn} 未找到")
+
+        results = search_resp.json().get("search") or []
+        entity_id = None
+        for r in results:
+            if r.get("label") == name or r.get("label", "").lower() == name.lower():
+                entity_id = r.get("id")
+                break
+        if not entity_id and results:
+            entity_id = results[0].get("id")
+
+        if not entity_id:
+            cache_manager.set("wikidata_person_photo", name, None)
             return None
-        image_links = (items[0].get("volumeInfo") or {}).get("imageLinks") or {}
-        # 优先使用thumbnail（较大），其次smallThumbnail
-        url = image_links.get("thumbnail") or image_links.get("smallThumbnail")
-        if url:
-            # Google Books返回的URL可能是http，转为https
-            url = url.replace("http://", "https://")
-        if url and is_valid_image_url(url):
-            return url
-        print(f"    📚 GoogleBooks: ✗ ISBN={isbn} 封面URL无效")
+
+        # 2. 获取实体详情，查找P18（图片）属性
+        entity_resp = requests.get(
+            f"https://www.wikidata.org/w/api.php",
+            params={
+                "action": "wbgetentities",
+                "ids": entity_id,
+                "props": "claims",
+                "format": "json",
+            },
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+        if entity_resp.status_code != 200:
+            cache_manager.set("wikidata_person_photo", name, None)
+            return None
+
+        claims = (entity_resp.json().get("entities") or {}).get(entity_id, {}).get("claims") or {}
+        p18_claims = claims.get("P18") or []
+        if not p18_claims:
+            cache_manager.set("wikidata_person_photo", name, None)
+            return None
+
+        # 3. 从P18获取文件名，构造Commons缩略图URL
+        for claim in p18_claims:
+            mainsnak = claim.get("mainsnak") or {}
+            datavalue = mainsnak.get("datavalue") or {}
+            filename = datavalue.get("value")
+            if not filename:
+                continue
+            # Wikimedia Commons缩略图API
+            encoded_name = requests.utils.quote(filename)
+            thumb_url = f"https://commons.wikimedia.org/w/thumb.php?f={encoded_name}&w=400"
+            if is_valid_image_url(thumb_url):
+                cache_manager.set("wikidata_person_photo", name, thumb_url)
+                return thumb_url
+
+        cache_manager.set("wikidata_person_photo", name, None)
         return None
-    except Exception as e:
-        print(f"    📚 GoogleBooks: ✗ 异常 {str(e)[:50]}")
+    except Exception:
+        cache_manager.set("wikidata_person_photo", name, None)
         return None
 
 
@@ -494,8 +631,8 @@ def _get_book_cover_parallel(title: str, author_name: Optional[str], isbn: Optio
     """并行尝试多个书籍封面源"""
     cover_sources = [
         ("Goodreads", lambda: get_goodreads_cover(title, author=author_name, isbn=isbn)),
-        ("OpenLibrary", lambda: get_openlibrary_book_cover(isbn)),
-        ("GoogleBooks", lambda: get_google_books_cover(isbn)),
+        ("OpenLibrary", lambda: get_openlibrary_book_cover(isbn, title=title, author=author_name)),
+        ("GoogleBooks", lambda: get_google_books_cover(isbn=isbn, title=title, author=author_name)),
     ]
 
     with ThreadPoolExecutor(max_workers=len(cover_sources)) as executor:
@@ -607,22 +744,41 @@ def _validate_single_person_photo(nh: NotionHelper, page: Dict, has_photo_proper
     print(f"  👤 [{name}] 照片无效，尝试查找替代照片...")
 
     new_photo = None
+    source = None
+
+    # 1. 尝试IMDB（演员/导演）
     if imdb_enabled and has_imdb_property:
         imdb_id = get_rich_text_value(page, "IMDB")
         print(f"    IMDB={imdb_id}")
         if imdb_id:
             person = get_imdb_person_info(imdb_id)
-            new_photo = (person or {}).get("photo")
-            if new_photo:
-                print(f"    IMDB照片: ✓ {new_photo[:80]}")
+            photo = (person or {}).get("photo")
+            if photo and is_valid_image_url(photo):
+                new_photo = photo
+                source = "IMDB"
+                print(f"    IMDB照片: ✓ {photo[:80]}")
             else:
                 print(f"    IMDB照片: ✗ 未找到")
-    else:
-        new_photo = get_openlibrary_author_photo(name)
-        if new_photo:
-            print(f"    OpenLibrary照片: ✓ {new_photo[:80]}")
+
+    # 2. 尝试OpenLibrary（作者/通用）
+    if not new_photo and name:
+        photo = get_openlibrary_author_photo(name)
+        if photo and is_valid_image_url(photo):
+            new_photo = photo
+            source = "OpenLibrary"
+            print(f"    OpenLibrary照片: ✓ {photo[:80]}")
         else:
             print(f"    OpenLibrary照片: ✗ 未找到")
+
+    # 3. 尝试Wikidata（兜底）
+    if not new_photo and name:
+        photo = get_wikidata_person_photo(name)
+        if photo and is_valid_image_url(photo):
+            new_photo = photo
+            source = "Wikidata"
+            print(f"    Wikidata照片: ✓ {photo[:80]}")
+        else:
+            print(f"    Wikidata照片: ✗ 未找到")
 
     if not new_photo or not is_valid_image_url(new_photo):
         status = "Missing" if (not prop_photo and not icon_url and not cover_url) else "Broken"
@@ -638,7 +794,6 @@ def _validate_single_person_photo(nh: NotionHelper, page: Dict, has_photo_proper
             image_url=new_photo,
             write_property=has_photo_property,
         )
-        source = "IMDB" if imdb_enabled else "OpenLibrary"
         print(f"  ✅ [{name}] 照片已更新: {source} {new_photo[:80]}")
         update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", "Ok", source)
         remove_data_issue_tags(nh.client, page, {"BrokenPhoto", "MissingPhoto"})
