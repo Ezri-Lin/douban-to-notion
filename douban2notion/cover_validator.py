@@ -74,7 +74,7 @@ def batch_validate_urls(urls: List[str], max_workers: int = MAX_URL_WORKERS) -> 
         return {}
 
     # 过滤掉已经在缓存中的URL
-    urls_to_check = [url for url in urls if url and not cache_manager.has("url_validation", url)]
+    urls_to_check = [url for url in urls if url and not cache_manager.has("data_audit_url_validation", url)]
     results = {}
 
     # 如果所有URL都在缓存中，直接返回
@@ -336,11 +336,12 @@ def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bo
 
 
 def _query_needing_repair(nh: NotionHelper, database_id: str, status_field: str) -> List[Dict]:
-    """只查询状态为 Missing 或 Broken 的条目，避免全量扫描"""
+    """查询状态为 Missing、Broken 或未设置的条目"""
     filter_payload = {
         "or": [
             {"property": status_field, "select": {"equals": "Missing"}},
             {"property": status_field, "select": {"equals": "Broken"}},
+            {"property": status_field, "select": {"is_empty": True}},
         ]
     }
     results = []
@@ -366,7 +367,7 @@ def validate_movie_covers(nh: NotionHelper, max_workers: int = MAX_WORKERS):
     fixed = 0
     checked = 0
 
-    print(f"[Movie] 开始验证 {len(pages)} 个需修复的电影封面 (并发数: {max_workers})")
+    print(f"[Movie] 开始验证 {len(pages)} 个电影封面 (并发数: {max_workers})")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_page = {
@@ -476,7 +477,7 @@ def validate_book_covers(nh: NotionHelper, max_workers: int = MAX_WORKERS):
     fixed = 0
     checked = 0
 
-    print(f"[Book] 开始验证 {len(pages)} 个需修复的书籍封面 (并发数: {max_workers})")
+    print(f"[Book] 开始验证 {len(pages)} 个书籍封面 (并发数: {max_workers})")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_page = {
@@ -594,7 +595,7 @@ def validate_people_photos(nh: NotionHelper, db_id: str, label: str, imdb_enable
     fixed = 0
     checked = 0
 
-    print(f"[{label}] 开始验证 {len(pages)} 个需修复的人物照片 (并发数: {max_workers})")
+    print(f"[{label}] 开始验证 {len(pages)} 个人物照片 (并发数: {max_workers})")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_page = {
