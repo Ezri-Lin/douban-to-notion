@@ -50,7 +50,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Run data audit
-        run: python -u -m douban2notion.data_audit ${{ inputs.scope }} --skip-url-check --enable-person-name-mismatch
+        run: python -u -m douban2notion.data_audit ${{ inputs.scope }} --enable-person-name-mismatch
 
   cover_repair:
     name: Cover Repair

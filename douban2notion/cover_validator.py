@@ -361,14 +361,21 @@ def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bo
         return True, False
 
 
-def _query_all_items(nh: NotionHelper, database_id: str) -> List[Dict]:
-    """查询所有条目（验证逻辑会判断是否需要修复）"""
+def _query_needing_repair(nh: NotionHelper, database_id: str, status_field: str) -> List[Dict]:
+    """查询状态为 Missing 或 Broken 的条目（由 data_audit 标记）"""
+    filter_payload = {
+        "or": [
+            {"property": status_field, "select": {"equals": "Missing"}},
+            {"property": status_field, "select": {"equals": "Broken"}},
+        ]
+    }
     results = []
     has_more = True
     start_cursor = None
     while has_more:
         response = nh.client.databases.query(
             database_id=database_id,
+            filter=filter_payload,
             start_cursor=start_cursor,
             page_size=100,
         )
@@ -381,7 +388,7 @@ def _query_all_items(nh: NotionHelper, database_id: str) -> List[Dict]:
 @timing
 def validate_movie_covers(nh: NotionHelper, max_workers: int = MAX_WORKERS):
     """并行验证电影封面（仅查 Missing/Broken）"""
-    pages = _query_all_items(nh, nh.movie_database_id)
+    pages = _query_needing_repair(nh, nh.movie_database_id, "CoverStatus")
     fixed = 0
     checked = 0
 
@@ -492,7 +499,7 @@ def _get_book_cover_parallel(title: str, author_name: Optional[str], isbn: Optio
 @timing
 def validate_book_covers(nh: NotionHelper, max_workers: int = MAX_WORKERS):
     """并行验证书籍封面（仅查 Missing/Broken）"""
-    pages = _query_all_items(nh, nh.book_database_id)
+    pages = _query_needing_repair(nh, nh.book_database_id, "CoverStatus")
     fixed = 0
     checked = 0
 
@@ -610,7 +617,7 @@ def validate_people_photos(nh: NotionHelper, db_id: str, label: str, imdb_enable
     has_photo_property = "Photo" in (schema.get("properties") or {})
     has_imdb_property = "IMDB" in (schema.get("properties") or {})
 
-    pages = _query_all_items(nh, db_id)
+    pages = _query_needing_repair(nh, db_id, "PhotoStatus")
     fixed = 0
     checked = 0
 

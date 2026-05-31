@@ -80,7 +80,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Audit all data
-        run: python -u -m douban2notion.data_audit all --skip-url-check --enable-person-name-mismatch
+        run: python -u -m douban2notion.data_audit all --enable-person-name-mismatch
 
   cover_validation:
     name: Validate & Repair Covers
