@@ -1196,13 +1196,16 @@ def insert_movie(
                 notion_helper.get_date_relation(properties, create_time)
 
                 icon = None
+                cover = None
                 if changed_fields.get("Cover") and movie.get("Cover"):
                     icon = get_icon(movie.get("Cover"))
+                    cover = get_icon(movie.get("Cover"))
 
                 notion_helper.update_page(
                     page_id=notion_movive.get("page_id"),
                     properties=properties,
                     icon=icon,
+                    cover=cover,
                 )
                 duplicate_rows = notion_movie_duplicates.get(movie.get("DB_Url")) or []
                 for duplicate_row in duplicate_rows:
@@ -1213,6 +1216,7 @@ def insert_movie(
                         page_id=duplicate_page_id,
                         properties=properties,
                         icon=icon,
+                        cover=cover,
                     )
                 notion_movive.update({
                     "Remark": movie.get("Remark"),
@@ -1657,10 +1661,12 @@ def insert_movie(
             if duplicate_movie:
                 print(f"  命中唯一校验，改为更新: {movie.get('Name')}")
                 icon = get_icon(cover) if cover else None
+                cover_payload = get_icon(cover) if cover else None
                 notion_helper.update_page(
                     page_id=duplicate_movie.get("page_id"),
                     properties=properties,
                     icon=icon,
+                    cover=cover_payload,
                 )
                 notion_movie_dict[movie.get("DB_Url")] = duplicate_movie
                 continue
@@ -1670,7 +1676,7 @@ def insert_movie(
                 "type": "database_id",
             }
             created_page = notion_helper.create_page(
-                parent=parent, properties=properties, icon=get_icon(cover)
+                parent=parent, properties=properties, icon=get_icon(cover), cover=get_icon(cover)
             )
             created_movie = {
                 "Remark": movie.get("Remark"),
@@ -2626,7 +2632,7 @@ def _resolve_movie_alias_for_chinese(clean_douban_title, clean_original_title, i
 
 
 def _resolve_cover_from_sources(imdb_info, subject, current_cover=None, tmdb_cover=None):
-    """Prefer IMDb poster, then TMDB, then keep current cover, finally fallback to Douban cover."""
+    """Prefer IMDb poster, then TMDB, then keep current cover. Douban images not usable from cloud."""
     poster = (imdb_info or {}).get("poster")
     if poster and _is_valid_image_url(poster):
         return poster, "IMDB", "Ok"
@@ -2634,15 +2640,6 @@ def _resolve_cover_from_sources(imdb_info, subject, current_cover=None, tmdb_cov
         return tmdb_cover, "TMDB", "Ok"
     if current_cover and _is_valid_image_url(current_cover):
         return current_cover, "Current", "Ok"
-    douban_cover = ((subject or {}).get("pic") or {}).get("normal") or ((subject or {}).get("pic") or {}).get("large")
-    if douban_cover:
-        candidates = [douban_cover]
-        webp_url = _to_webp_variant(douban_cover)
-        if webp_url != douban_cover:
-            candidates.append(webp_url)
-        resolved_douban_cover = _pick_first_valid_cover(candidates)
-        if resolved_douban_cover:
-            return resolved_douban_cover, "Douban", "Ok"
     if current_cover:
         return current_cover, "Current", "Broken"
     return None, None, "Missing"
@@ -3713,9 +3710,9 @@ def get_goodreads_rating(isbn):
 def _is_valid_image_url(url):
     if not url:
         return False
-    # 豆瓣图片URL直接信任（doubanio.com对云端IP返回418反爬，但URL本身有效）
+    # doubanio.com 对云端IP返回418反爬，URL本身不可用
     if "doubanio.com" in url:
-        return True
+        return False
     if url in COVER_URL_VALIDITY_CACHE:
         return COVER_URL_VALIDITY_CACHE[url]
     try:
@@ -4095,7 +4092,7 @@ def _get_book_cover(subject, title):
     authors = subject.get("author") or []
     author_name = authors[0] if authors else None
 
-    # 定义封面源（按优先级排序）
+    # 定义封面源（按优先级排序，Douban不可用已移除）
     cover_sources = [
         ("Amazon", lambda: get_amazon_cover(isbn=isbn, isbn13=isbn13)),
         ("Goodreads", lambda: get_goodreads_cover(title, author=author_name, isbn=isbn)),
@@ -4105,7 +4102,6 @@ def _get_book_cover(subject, title):
             title=title,
             author=author_name,
         )),
-        ("Douban", lambda: _get_douban_book_cover(subject)),
         ("OpenLibrary", lambda: _get_openlibrary_cover(isbn)),
     ]
 
@@ -4123,10 +4119,6 @@ def _get_book_cover(subject, title):
                 result = future.result()
                 if not result:
                     continue
-                # 豆瓣API返回的URL直接信任（doubanio.com对云端IP返回418反爬，但URL有效）
-                if source_name == "Douban" and "doubanio.com" in result:
-                    print(f"从{source_name}获取封面成功: {title}")
-                    return result, source_name
                 if _is_valid_image_url(result):
                     print(f"从{source_name}获取封面成功: {title}")
                     return result, source_name
@@ -4617,10 +4609,12 @@ def insert_book(
                 print(f"更新: {book.get('Name')} [{', '.join(changed_keys)}]")
                 notion_helper.get_date_relation(properties, create_time)
                 icon = get_icon(book.get("Cover")) if changed_fields.get("Cover") and book.get("Cover") else None
+                cover_payload = get_icon(book.get("Cover")) if changed_fields.get("Cover") and book.get("Cover") else None
                 notion_helper.update_page(
                     page_id=existing_book.get("page_id"),
                     properties=properties,
                     icon=icon,
+                    cover=cover_payload,
                 )
                 duplicate_rows = notion_book_duplicates.get(book.get("DB_Url")) or []
                 for duplicate_row in duplicate_rows:
@@ -4631,6 +4625,7 @@ def insert_book(
                         page_id=duplicate_page_id,
                         properties=properties,
                         icon=icon,
+                        cover=cover_payload,
                     )
             else:
                 sync_stats["skipped_unchanged"] += 1
@@ -4649,7 +4644,7 @@ def insert_book(
                 "type": "database_id",
             }
             created_page = notion_helper.create_page(
-                parent=parent, properties=properties, icon=get_icon(book.get("Cover"))
+                parent=parent, properties=properties, icon=get_icon(book.get("Cover")), cover=get_icon(book.get("Cover"))
             )
             created_book = {
                 "Name": book.get("Name"),

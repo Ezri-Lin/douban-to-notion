@@ -428,10 +428,12 @@ class NotionHelper:
         return False
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
-    def update_page(self, page_id, properties, icon=None):
+    def update_page(self, page_id, properties, icon=None, cover=None):
         update_data = {"page_id": page_id, "properties": properties}
         if icon:
             update_data["icon"] = icon
+        if cover:
+            update_data["cover"] = cover
         return self.client.pages.update(**update_data)
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
@@ -439,12 +441,14 @@ class NotionHelper:
         return self.client.pages.update(page_id=page_id, archived=True)
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
-    def create_page(self, parent, properties, icon):
+    def create_page(self, parent, properties, icon, cover=None):
         try:
+            kwargs = {"parent": parent, "properties": properties}
             if icon:
-                return self.client.pages.create(parent=parent, properties=properties, icon=icon)
-            else:
-                return self.client.pages.create(parent=parent, properties=properties)
+                kwargs["icon"] = icon
+            if cover:
+                kwargs["cover"] = cover
+            return self.client.pages.create(**kwargs)
         except Exception as e:
             print(f"创建页面失败: {str(e)}")
             print(f"Parent: {parent}")
