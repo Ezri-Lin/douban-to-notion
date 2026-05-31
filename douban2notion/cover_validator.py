@@ -197,6 +197,7 @@ def remove_data_issue_tags(client, page, tags_to_remove):
 
 def get_openlibrary_book_cover(isbn: Optional[str]) -> Optional[str]:
     if not isbn:
+        print(f"    📚 OpenLibrary: ✗ 无ISBN")
         return None
     candidates = [
         f"https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg?default=false",
@@ -205,12 +206,14 @@ def get_openlibrary_book_cover(isbn: Optional[str]) -> Optional[str]:
     for url in candidates:
         if is_valid_image_url(url):
             return url
+    print(f"    📚 OpenLibrary: ✗ ISBN={isbn} 封面无效")
     return None
 
 
 def get_google_books_cover(isbn: Optional[str]) -> Optional[str]:
     """从Google Books API获取封面"""
     if not isbn:
+        print(f"    📚 GoogleBooks: ✗ 无ISBN")
         return None
     try:
         response = requests.get(
@@ -219,9 +222,11 @@ def get_google_books_cover(isbn: Optional[str]) -> Optional[str]:
             timeout=10,
         )
         if response.status_code != 200:
+            print(f"    📚 GoogleBooks: ✗ HTTP {response.status_code}")
             return None
         items = response.json().get("items") or []
         if not items:
+            print(f"    📚 GoogleBooks: ✗ ISBN={isbn} 未找到")
             return None
         image_links = (items[0].get("volumeInfo") or {}).get("imageLinks") or {}
         # 优先使用thumbnail（较大），其次smallThumbnail
@@ -229,8 +234,12 @@ def get_google_books_cover(isbn: Optional[str]) -> Optional[str]:
         if url:
             # Google Books返回的URL可能是http，转为https
             url = url.replace("http://", "https://")
-        return url if url and is_valid_image_url(url) else None
-    except Exception:
+        if url and is_valid_image_url(url):
+            return url
+        print(f"    📚 GoogleBooks: ✗ ISBN={isbn} 封面URL无效")
+        return None
+    except Exception as e:
+        print(f"    📚 GoogleBooks: ✗ 异常 {str(e)[:50]}")
         return None
 
 
@@ -327,9 +336,13 @@ def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bo
         remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
         return True, False  # checked, fixed
 
+    title = get_title_value(page, "Name")
     imdb_id = get_rich_text_value(page, "IMDB")
+    print(f"  🎬 电影 [{title}] IMDB={imdb_id} 封面无效，尝试查找替代封面...")
+
     if not imdb_id:
         status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
+        print(f"  ❌ 电影 [{title}] 无IMDB ID，状态: {status}")
         update_check_fields(
             nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status
         )
@@ -339,6 +352,7 @@ def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bo
     new_cover = (imdb_info or {}).get("poster")
     if not new_cover or not is_valid_image_url(new_cover):
         status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
+        print(f"  ❌ 电影 [{title}] IMDB封面无效，状态: {status}")
         update_check_fields(
             nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status
         )
@@ -346,6 +360,7 @@ def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bo
 
     try:
         update_page_media(nh.client, page_id, "Cover", new_cover, write_property=True)
+        print(f"  ✅ 电影 [{title}] 封面已更新: IMDB {new_cover[:80]}")
         update_check_fields(
             nh.client,
             page,
@@ -357,7 +372,8 @@ def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bo
         )
         remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
         return True, True  # checked, fixed
-    except Exception:
+    except Exception as e:
+        print(f"  ❌ 电影 [{title}] 更新失败: {str(e)[:50]}")
         return True, False
 
 
@@ -442,11 +458,14 @@ def _validate_single_book_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, boo
     if author_rel:
         author_name = get_author_name_by_id(nh, author_rel[0].get("id"))
 
+    print(f"  🔍 书 [{title}] ISBN={isbn} 作者={author_name} 封面无效，尝试查找替代封面...")
+
     # 并行尝试多个封面源
     new_cover, source = _get_book_cover_parallel(title, author_name, isbn)
 
     if not new_cover:
         status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
+        print(f"  ❌ 书 [{title}] 未找到可用封面，状态: {status}")
         update_check_fields(
             nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status
         )
@@ -454,6 +473,7 @@ def _validate_single_book_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, boo
 
     try:
         update_page_media(nh.client, page_id, "Cover", new_cover, write_property=True)
+        print(f"  ✅ 书 [{title}] 封面已更新: {source} {new_cover[:80]}")
         update_check_fields(
             nh.client,
             page,
@@ -465,7 +485,8 @@ def _validate_single_book_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, boo
         )
         remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
         return True, True
-    except Exception:
+    except Exception as e:
+        print(f"  ❌ 书 [{title}] 更新失败: {str(e)[:50]}")
         return True, False
 
 
@@ -488,11 +509,18 @@ def _get_book_cover_parallel(title: str, author_name: Optional[str], isbn: Optio
             source_name = future_to_source[future]
             try:
                 result = future.result()
-                if result and is_valid_image_url(result):
-                    return result, source_name
-            except Exception:
+                if result:
+                    valid = is_valid_image_url(result)
+                    print(f"    📚 {source_name}: {'✓' if valid else '✗'} {result[:80] if result else 'None'}")
+                    if valid:
+                        return result, source_name
+                else:
+                    print(f"    📚 {source_name}: ✗ 未找到")
+            except Exception as e:
+                print(f"    📚 {source_name}: ✗ 异常 {str(e)[:50]}")
                 continue
 
+    print(f"  ❌ 所有封面源都未找到可用封面")
     return None, None
 
 
@@ -576,17 +604,29 @@ def _validate_single_person_photo(nh: NotionHelper, page: Dict, has_photo_proper
         remove_data_issue_tags(nh.client, page, {"BrokenPhoto", "MissingPhoto"})
         return True, False
 
+    print(f"  👤 [{name}] 照片无效，尝试查找替代照片...")
+
     new_photo = None
     if imdb_enabled and has_imdb_property:
         imdb_id = get_rich_text_value(page, "IMDB")
+        print(f"    IMDB={imdb_id}")
         if imdb_id:
             person = get_imdb_person_info(imdb_id)
             new_photo = (person or {}).get("photo")
+            if new_photo:
+                print(f"    IMDB照片: ✓ {new_photo[:80]}")
+            else:
+                print(f"    IMDB照片: ✗ 未找到")
     else:
         new_photo = get_openlibrary_author_photo(name)
+        if new_photo:
+            print(f"    OpenLibrary照片: ✓ {new_photo[:80]}")
+        else:
+            print(f"    OpenLibrary照片: ✗ 未找到")
 
     if not new_photo or not is_valid_image_url(new_photo):
         status = "Missing" if (not prop_photo and not icon_url and not cover_url) else "Broken"
+        print(f"  ❌ [{name}] 未找到可用照片，状态: {status}")
         update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", status)
         return True, False
 
@@ -599,10 +639,12 @@ def _validate_single_person_photo(nh: NotionHelper, page: Dict, has_photo_proper
             write_property=has_photo_property,
         )
         source = "IMDB" if imdb_enabled else "OpenLibrary"
+        print(f"  ✅ [{name}] 照片已更新: {source} {new_photo[:80]}")
         update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", "Ok", source)
         remove_data_issue_tags(nh.client, page, {"BrokenPhoto", "MissingPhoto"})
         return True, True
-    except Exception:
+    except Exception as e:
+        print(f"  ❌ [{name}] 更新失败: {str(e)[:50]}")
         return True, False
 
 
