@@ -407,6 +407,95 @@ def enrich_book_covers(dry_run=False):
     print(f'\nBook done: {enriched} enriched, {failed} failed')
 
 
+# ─── Douban author scraping ─────────────────────────────────────
+
+def _author_name_matches(author_name, douban_name):
+    """Check if a Notion author name matches a Douban author name."""
+    # Normalize: strip prefixes like [美], [英], etc.
+    clean_author = re.sub(r'^\[.*?\]\s*', '', author_name).strip()
+    clean_douban = re.sub(r'^\[.*?\]\s*', '', douban_name).strip()
+    # Strip trailing annotations (编), (选), etc.
+    clean_author = re.sub(r'[（(][^）)]*[）)]$', '', clean_author).strip()
+    clean_douban = re.sub(r'[（(][^）)]*[）)]$', '', clean_douban).strip()
+    # Case-insensitive comparison
+    return clean_author.lower() == clean_douban.lower()
+
+
+def scrape_douban_author_photo_from_book(subject_id, author_name):
+    """Scrape a Douban book page for an author link, then fetch the author photo.
+
+    Returns photo URL or None.
+    """
+    url = f'https://book.douban.com/subject/{subject_id}/'
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            page.goto(url, timeout=30000)
+            time.sleep(6)
+            content = page.content()
+        except Exception:
+            browser.close()
+            return None
+        browser.close()
+
+    if len(content) < 5000:
+        return None
+
+    # Find author links: /author/{id} with matching name
+    # Pattern: <a href="/author/12345">Author Name</a>
+    author_links = re.findall(
+        r'href="(?:https?://book\.douban\.com)?/author/(\d+)"[^>]*>([^<]+)</a>',
+        content
+    )
+    for author_id, douban_name in author_links:
+        if _author_name_matches(author_name, douban_name.strip()):
+            return _fetch_douban_author_page_photo(author_id)
+
+    # Also try: find all /author/ IDs and check the info section for name matching
+    info_match = re.search(r'<div id="info"[^>]*>(.*?)</div>', content, re.DOTALL)
+    if info_match:
+        info = info_match.group(1)
+        # Find author names in info
+        author_entries = re.findall(
+            r'href="(?:https?://book\.douban\.com)?/author/(\d+)"[^>]*>([^<]+)',
+            info
+        )
+        for author_id, douban_name in author_entries:
+            if _author_name_matches(author_name, douban_name.strip()):
+                return _fetch_douban_author_page_photo(author_id)
+
+    return None
+
+
+def _fetch_douban_author_page_photo(author_id):
+    """Fetch photo from a Douban author page."""
+    url = f'https://book.douban.com/author/{author_id}/'
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            page.goto(url, timeout=30000)
+            time.sleep(5)
+            content = page.content()
+        except Exception:
+            browser.close()
+            return None
+        browser.close()
+
+    if len(content) < 5000:
+        return None
+
+    # Author photo is in <img> with author-related class or src containing img/author/
+    author_imgs = re.findall(
+        r'<img[^>]*src="(https://img\d+\.doubanio\.com/img/author/[^"]+)"',
+        content
+    )
+    if author_imgs:
+        return author_imgs[0]
+    return None
+
+
 # ─── Open Library helpers ────────────────────────────────────────
 
 def openlibrary_search_author(name):
@@ -452,7 +541,7 @@ def openlibrary_author_photo(ol_key):
 # ─── Enrichment logic ───────────────────────────────────────────
 
 def enrich_author_photos(dry_run=False):
-    """Enrich Author photos using Open Library API."""
+    """Enrich Author photos. Tries Douban author pages first, then Open Library."""
     config = DB_CONFIG['Author']
     db_id = config['id']
     token = config['token']
@@ -460,6 +549,7 @@ def enrich_author_photos(dry_run=False):
     status_prop = config['status_prop']
     checked_prop = config['checked_prop']
     source_prop = config['source_prop']
+    book_prop = config.get('person_prop', '书籍')
 
     print('\n=== Enriching Author photos ===')
     pages = notion_query(db_id, token)
@@ -468,7 +558,9 @@ def enrich_author_photos(dry_run=False):
         name = get_name(p)
         status = (p.get('properties') or {}).get(status_prop, {}).get('select', {})
         if name and (p.get('cover') is None or (status and status.get('name') == 'Missing')):
-            needs_work.append({'page': p, 'name': name})
+            alt_name = get_field(p, 'Alt-Name')
+            book_ids = get_relation_ids(p, book_prop)
+            needs_work.append({'page': p, 'name': name, 'alt_name': alt_name, 'book_ids': book_ids})
 
     print(f'Total: {len(pages)}, Needs photo: {len(needs_work)}')
 
@@ -476,29 +568,52 @@ def enrich_author_photos(dry_run=False):
     failed = 0
     for i, item in enumerate(needs_work):
         name = item['name']
+        alt_name = item['alt_name']
         page_id = item['page']['id']
+        book_ids = item['book_ids']
+        photo_url = None
+        source = None
 
-        ol_key = openlibrary_search_author(name)
-        if not ol_key:
-            if dry_run:
-                print(f'  [{i+1}/{len(needs_work)}] {name}: no OL match')
-            else:
-                print(f'  [{i+1}/{len(needs_work)}] {name}: no OL match')
-            failed += 1
-            time.sleep(1)
-            continue
+        # 1) Try Douban: scrape linked books for /author/ link
+        for book_id in book_ids[:3]:
+            try:
+                book_page = notion_get_page(book_id, token)
+            except Exception:
+                continue
+            subject_id = get_douban_subject_id(book_page)
+            if not subject_id:
+                continue
 
-        photo_url = openlibrary_author_photo(ol_key)
-        if dry_run:
-            status = 'found' if photo_url else 'no photo'
-            print(f'  [{i+1}/{len(needs_work)}] {name}: OL={ol_key}, {status}')
+            photo_url = scrape_douban_author_photo_from_book(subject_id, name)
             if photo_url:
+                source = 'Douban'
+                break
+            time.sleep(2)
+
+        # 2) Fallback: Open Library (try alt_name first, then name)
+        if not photo_url:
+            for search_name in ([alt_name, name] if alt_name else [name]):
+                if not search_name:
+                    continue
+                ol_key = openlibrary_search_author(search_name)
+                if ol_key:
+                    photo_url = openlibrary_author_photo(ol_key)
+                    if photo_url:
+                        source = 'OpenLibrary'
+                        break
+                time.sleep(1)
+
+        if dry_run:
+            if photo_url:
+                print(f'  [{i+1}/{len(needs_work)}] {name}: found via {source}')
                 enriched += 1
+            else:
+                print(f'  [{i+1}/{len(needs_work)}] {name}: no photo found')
             time.sleep(1)
             continue
 
         if not photo_url:
-            print(f'  [{i+1}/{len(needs_work)}] {name}: OL={ol_key}, no photo')
+            print(f'  [{i+1}/{len(needs_work)}] {name}: no photo found')
             failed += 1
             time.sleep(1)
             continue
@@ -521,7 +636,7 @@ def enrich_author_photos(dry_run=False):
         ok = notion_set_cover(token, page_id, upload_id, photo_url,
                               cover_prop, status_prop, checked_prop, source_prop)
         if ok:
-            print(f'  [{i+1}/{len(needs_work)}] {name}: uploaded')
+            print(f'  [{i+1}/{len(needs_work)}] {name}: uploaded via {source}')
             enriched += 1
         else:
             print(f'  [{i+1}/{len(needs_work)}] {name}: cover set failed')
