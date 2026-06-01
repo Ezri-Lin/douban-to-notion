@@ -443,26 +443,33 @@ def get_openlibrary_author_photo(author_name: Optional[str]) -> Optional[str]:
     return photo_url
 
 
-def get_author_name_by_id(notion_helper: NotionHelper, author_id: str) -> Optional[str]:
-    """获取作者名称（使用缓存管理器，自动查找title类型属性）"""
-    cached_name = cache_manager.get("author_name", author_id)
-    if cached_name is not None:
-        return cached_name
+def get_author_name_by_id(notion_helper: NotionHelper, author_id: str) -> Tuple[Optional[str], Optional[str]]:
+    """获取作者名称和Alt-Name（使用缓存管理器，自动查找title类型属性）
 
+    Returns:
+        (title_name, alt_name) 元组
+    """
+    cached = cache_manager.get("author_name", author_id)
+    if cached is not None:
+        return cached  # (title_name, alt_name) or None
+
+    title_name = None
+    alt_name = None
     try:
         page = notion_helper.client.pages.retrieve(page_id=author_id)
         # 遍历所有属性，找到type=="title"的那个（兼容Name/标题/其他命名）
         for prop in (page.get("properties") or {}).values():
             if (prop or {}).get("type") == "title":
-                name = get_property_value(prop)
-                if name:
-                    cache_manager.set("author_name", author_id, name)
-                    return name
+                title_name = get_property_value(prop)
+                break
+        # 获取Alt-Name（中国人存英文名，外国人存中文名，辅助搜索用）
+        alt_name = get_property_value((page.get("properties") or {}).get("Alt-Name") or {})
     except Exception:
         pass
 
-    cache_manager.set("author_name", author_id, None)
-    return None
+    result = (title_name, alt_name) if title_name else None
+    cache_manager.set("author_name", author_id, result)
+    return result
 
 
 def _extract_douban_subject_id(url: Optional[str]) -> Optional[str]:
@@ -854,10 +861,13 @@ def _validate_single_book_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, boo
     isbn = get_rich_text_value(page, "ISBN")
     author_rel = ((page.get("properties") or {}).get("Author") or {}).get("relation") or []
     author_name = None
+    author_alt_name = None
     if author_rel:
-        author_name = get_author_name_by_id(nh, author_rel[0].get("id"))
+        result = get_author_name_by_id(nh, author_rel[0].get("id"))
+        if result:
+            author_name, author_alt_name = result
 
-    print(f"  🔍 书 [{title}] ISBN={isbn} 作者={author_name} 封面无效，尝试查找替代封面...")
+    print(f"  🔍 书 [{title}] ISBN={isbn} 作者={author_name} (Alt: {author_alt_name}) 封面无效，尝试查找替代封面...")
 
     # 1. 优先尝试豆瓣（最高置信度，下载后上传）
     upload_id, douban_url = _get_douban_book_cover_via_upload(nh, page)
@@ -875,7 +885,7 @@ def _validate_single_book_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, boo
             print(f"  ⚠️ 书 [{title}] 豆瓣封面上传失败，尝试其他源...")
 
     # 2. 回退到其他源（Goodreads/OpenLibrary/GoogleBooks）
-    new_cover, source = _get_book_cover_parallel(title, author_name, isbn)
+    new_cover, source = _get_book_cover_parallel(title, author_name, isbn, author_alt_name)
 
     if not new_cover:
         status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
@@ -904,12 +914,27 @@ def _validate_single_book_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, boo
         return True, False
 
 
-def _get_book_cover_parallel(title: str, author_name: Optional[str], isbn: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    """并行尝试多个书籍封面源"""
+def _get_book_cover_parallel(title: str, author_name: Optional[str], isbn: Optional[str],
+                              author_alt_name: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
+    """并行尝试多个书籍封面源（优先使用author_name，Alt-Name作为备选）"""
+    # 构建作者名列表：优先主名，Alt-Name作为备选
+    author_names = [name for name in [author_name, author_alt_name] if name]
+
+    def _search_with_author_names(search_func):
+        """尝试用多个作者名搜索"""
+        for name in author_names:
+            result = search_func(author=name)
+            if result:
+                return result
+        return None
+
     cover_sources = [
-        ("Goodreads", lambda: get_goodreads_cover(title, author=author_name, isbn=isbn)),
-        ("OpenLibrary", lambda: get_openlibrary_book_cover(isbn, title=title, author=author_name)),
-        ("GoogleBooks", lambda: get_google_books_cover(isbn=isbn, title=title, author=author_name)),
+        ("Goodreads", lambda: _search_with_author_names(
+            lambda author: get_goodreads_cover(title, author=author, isbn=isbn))),
+        ("OpenLibrary", lambda: _search_with_author_names(
+            lambda author: get_openlibrary_book_cover(isbn, title=title, author=author))),
+        ("GoogleBooks", lambda: _search_with_author_names(
+            lambda author: get_google_books_cover(isbn=isbn, title=title, author=author))),
     ]
 
     with ThreadPoolExecutor(max_workers=len(cover_sources)) as executor:
