@@ -55,7 +55,7 @@ MAX_PUBLISHERS_MULTI_SELECT = 3
 # Actor/Director数据库字段定义
 actor_properties_type_dict = {
     "Name": TITLE,  # 人物名字
-    "C-Name": RICH_TEXT,  # 中文译名
+    "Alt-Name": RICH_TEXT,  # 备用名：中国人存英文名，外国人存中文名
     "Photo": FILES,  # 人物照片
     "PhotoStatus": SELECT,
     "PhotoCheckedAt": DATE,
@@ -69,7 +69,7 @@ actor_properties_type_dict = {
 
 director_properties_type_dict = {
     "Name": TITLE,
-    "C-Name": RICH_TEXT,
+    "Alt-Name": RICH_TEXT,
     "Photo": FILES,
     "PhotoStatus": SELECT,
     "PhotoCheckedAt": DATE,

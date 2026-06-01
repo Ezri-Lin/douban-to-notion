@@ -1438,7 +1438,7 @@ def insert_movie(
 
             # 根据语言选择Actor/Director数据源
             if is_chinese:
-                # 中文电影：有IMDB时优先走IMDB（保留豆瓣中文名到 C-Name），无IMDB回退豆瓣
+                # 中文电影：有IMDB时优先走IMDB（保留豆瓣中文名到 Alt-Name），无IMDB回退豆瓣
                 if imdb_id:
                     print(f"  中文条目使用IMDB补充演员/导演信息")
                     cast_crew = get_imdb_cast_and_crew(imdb_id)
@@ -4284,7 +4284,7 @@ def _build_author_lookup(notion_helper):
     for page in authors:
         props = page.get("properties") or {}
         name = _normalize_person_name(_extract_page_title(page))
-        c_name = _normalize_person_name(utils.get_property_value(props.get("C-Name") or {}))
+        c_name = _normalize_person_name(utils.get_property_value(props.get("Alt-Name") or {}))
         imdb = _normalize_person_name(utils.get_property_value(props.get("IMDB") or {}))
         photo = utils.get_property_value(props.get("Photo") or {})
         record = {

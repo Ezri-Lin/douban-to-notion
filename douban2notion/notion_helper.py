@@ -269,7 +269,7 @@ class NotionHelper:
                 photo_source = person_info.get('photo_source')
                 if photo_source == "TMDB":
                     photo_source = "IMDB"
-                # Temporarily disable C-Name/Nation auto-fill; use Notion AI/manual curation.
+                # Temporarily disable Alt-Name/Nation auto-fill; use Notion AI/manual curation.
                 if photo_ok and "Photo" in db_properties:
                     properties["Photo"] = {
                         "files": [{"type": "external", "name": "Photo", "external": {"url": photo_url}}]

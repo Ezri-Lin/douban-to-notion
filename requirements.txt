@@ -9,3 +9,4 @@ lxml>=4.9.3
 tqdm>=4.66.0
 pytest>=9.0.3
 urllib3>=2.7.0
+playwright>=1.40.0
