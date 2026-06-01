@@ -765,18 +765,6 @@ def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bo
         nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status
     )
     return True, False
-            page,
-            "CoverStatus",
-            "CoverCheckedAt",
-            "CoverSource",
-            "Ok",
-            "IMDB",
-        )
-        remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
-        return True, True  # checked, fixed
-    except Exception as e:
-        print(f"  ❌ 电影 [{title}] 更新失败: {str(e)[:50]}")
-        return True, False
 
 
 def _query_needing_repair(nh: NotionHelper, database_id: str, status_field: str) -> List[Dict]:
