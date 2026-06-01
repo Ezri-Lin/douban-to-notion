@@ -26,6 +26,9 @@ DOUBAN_API_HOST = os.getenv("DOUBAN_API_HOST", "frodo.douban.com")
 DOUBAN_API_KEY = os.getenv("DOUBAN_API_KEY", "0ac44ae016490db2204ce0a042db2916")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
 
+# Cache for celebrity URLs extracted from Douban movie pages
+_celebrity_urls_cache = {}
+
 from douban2notion.config import (
     movie_properties_type_dict,
     book_properties_type_dict,
@@ -794,6 +797,8 @@ def insert_movie(
                 print(f"  使用IMDB覆盖配置: {imdb_id}")
             else:
                 imdb_id = notion_imdb_id or get_imdb(movie.get("DB_Url"))
+            # Capture celebrity URLs from Douban movie page for actor/director DB_Url
+            douban_celebrity_urls = get_cached_celebrity_urls(movie.get("DB_Url"))
             if imdb_id and not _is_imdb_media_type_compatible(imdb_id, subtype):
                 imdb_id = None
             if notion_imdb_id and repair_flags.get("imdb") and not existing_imdb_consistent:
@@ -971,12 +976,18 @@ def insert_movie(
                             if idx < len(cast_crew['actors']):
                                 actor_entry = cast_crew['actors'][idx] or {}
                                 imdb_person_id = actor_entry.get("id")
+                            # Find matching Douban celebrity URL
+                            actor_douban_url = _find_celebrity_url(
+                                douban_celebrity_urls.get("actors") if douban_celebrity_urls else None,
+                                actor_name
+                            )
                             person_info = (
                                 _build_person_info_payload(
                                     imdb_person_id,
                                     c_name=actor_name,
                                     photo=(actor_entry or {}).get("photo"),
                                     photo_source=(actor_entry or {}).get("photo_source"),
+                                    douban_url=actor_douban_url,
                                 )
                                 if imdb_person_id
                                 else _build_person_info_payload(
@@ -984,6 +995,7 @@ def insert_movie(
                                     c_name=actor_name,
                                     photo=(actor_entry or {}).get("photo"),
                                     photo_source=(actor_entry or {}).get("photo_source"),
+                                    douban_url=actor_douban_url,
                                 )
                             )
                             actor_ids.append(
@@ -1010,11 +1022,17 @@ def insert_movie(
                     if cast_crew and cast_crew['actors']:
                         actor_ids = []
                         for actor in cast_crew['actors']:
+                            # Find matching Douban celebrity URL
+                            actor_douban_url = _find_celebrity_url(
+                                douban_celebrity_urls.get("actors") if douban_celebrity_urls else None,
+                                actor.get("name")
+                            )
                             person_info = _build_person_info_payload(
                                 actor.get("id"),
                                 c_name=None,
                                 photo=(actor or {}).get("photo"),
                                 photo_source=(actor or {}).get("photo_source"),
+                                douban_url=actor_douban_url,
                             )
                             actor_ids.append(
                                 notion_helper.get_relation_id(
@@ -1056,12 +1074,18 @@ def insert_movie(
                             if idx < len(cast_crew['directors']):
                                 director_entry = cast_crew['directors'][idx] or {}
                                 imdb_person_id = director_entry.get("id")
+                            # Find matching Douban celebrity URL
+                            director_douban_url = _find_celebrity_url(
+                                douban_celebrity_urls.get("directors") if douban_celebrity_urls else None,
+                                director_name
+                            )
                             person_info = (
                                 _build_person_info_payload(
                                     imdb_person_id,
                                     c_name=director_name,
                                     photo=(director_entry or {}).get("photo"),
                                     photo_source=(director_entry or {}).get("photo_source"),
+                                    douban_url=director_douban_url,
                                 )
                                 if imdb_person_id
                                 else _build_person_info_payload(
@@ -1069,6 +1093,7 @@ def insert_movie(
                                     c_name=director_name,
                                     photo=(director_entry or {}).get("photo"),
                                     photo_source=(director_entry or {}).get("photo_source"),
+                                    douban_url=director_douban_url,
                                 )
                             )
                             director_ids.append(
@@ -1095,11 +1120,17 @@ def insert_movie(
                     if cast_crew and cast_crew['directors']:
                         director_ids = []
                         for director in cast_crew['directors']:
+                            # Find matching Douban celebrity URL
+                            director_douban_url = _find_celebrity_url(
+                                douban_celebrity_urls.get("directors") if douban_celebrity_urls else None,
+                                director.get("name")
+                            )
                             person_info = _build_person_info_payload(
                                 director.get("id"),
                                 c_name=None,
                                 photo=(director or {}).get("photo"),
                                 photo_source=(director or {}).get("photo_source"),
+                                douban_url=director_douban_url,
                             )
                             director_ids.append(
                                 notion_helper.get_relation_id(
@@ -1298,6 +1329,8 @@ def insert_movie(
                 print(f"  使用IMDB覆盖配置: {imdb_id}")
             else:
                 imdb_id = get_imdb(movie.get("DB_Url"))
+            # Capture celebrity URLs from Douban movie page for actor/director DB_Url
+            douban_celebrity_urls = get_cached_celebrity_urls(movie.get("DB_Url"))
             if imdb_id and not _is_imdb_media_type_compatible(imdb_id, subtype):
                 imdb_id = None
             if not imdb_id:
@@ -1456,12 +1489,18 @@ def insert_movie(
                             if idx < len(cast_crew['actors']):
                                 actor_entry = cast_crew['actors'][idx] or {}
                                 imdb_person_id = actor_entry.get("id")
+                            # Find matching Douban celebrity URL
+                            actor_douban_url = _find_celebrity_url(
+                                douban_celebrity_urls.get("actors") if douban_celebrity_urls else None,
+                                actor_name
+                            )
                             person_info = (
                                 _build_person_info_payload(
                                     imdb_person_id,
                                     c_name=actor_name,
                                     photo=(actor_entry or {}).get("photo"),
                                     photo_source=(actor_entry or {}).get("photo_source"),
+                                    douban_url=actor_douban_url,
                                 )
                                 if imdb_person_id
                                 else _build_person_info_payload(
@@ -1469,6 +1508,7 @@ def insert_movie(
                                     c_name=actor_name,
                                     photo=(actor_entry or {}).get("photo"),
                                     photo_source=(actor_entry or {}).get("photo_source"),
+                                    douban_url=actor_douban_url,
                                 )
                             )
                             actor_id = notion_helper.get_relation_id(
@@ -1494,12 +1534,18 @@ def insert_movie(
                             if idx < len(cast_crew['directors']):
                                 director_entry = cast_crew['directors'][idx] or {}
                                 imdb_person_id = director_entry.get("id")
+                            # Find matching Douban celebrity URL
+                            director_douban_url = _find_celebrity_url(
+                                douban_celebrity_urls.get("directors") if douban_celebrity_urls else None,
+                                director_name
+                            )
                             person_info = (
                                 _build_person_info_payload(
                                     imdb_person_id,
                                     c_name=director_name,
                                     photo=(director_entry or {}).get("photo"),
                                     photo_source=(director_entry or {}).get("photo_source"),
+                                    douban_url=director_douban_url,
                                 )
                                 if imdb_person_id
                                 else _build_person_info_payload(
@@ -1507,6 +1553,7 @@ def insert_movie(
                                     c_name=director_name,
                                     photo=(director_entry or {}).get("photo"),
                                     photo_source=(director_entry or {}).get("photo_source"),
+                                    douban_url=director_douban_url,
                                 )
                             )
                             director_id = notion_helper.get_relation_id(
@@ -1559,11 +1606,17 @@ def insert_movie(
                     if cast_crew['actors']:
                         actor_relations = []
                         for idx, actor in enumerate(cast_crew['actors']):
+                            # Find matching Douban celebrity URL
+                            actor_douban_url = _find_celebrity_url(
+                                douban_celebrity_urls.get("actors") if douban_celebrity_urls else None,
+                                actor.get("name")
+                            )
                             person_info = _build_person_info_payload(
                                 actor.get("id"),
                                 c_name=None,
                                 photo=(actor or {}).get("photo"),
                                 photo_source=(actor or {}).get("photo_source"),
+                                douban_url=actor_douban_url,
                             )
 
                             actor_id = notion_helper.get_relation_id(
@@ -1595,11 +1648,17 @@ def insert_movie(
                     if cast_crew['directors']:
                         director_relations = []
                         for idx, director in enumerate(cast_crew['directors']):
+                            # Find matching Douban celebrity URL
+                            director_douban_url = _find_celebrity_url(
+                                douban_celebrity_urls.get("directors") if douban_celebrity_urls else None,
+                                director.get("name")
+                            )
                             person_info = _build_person_info_payload(
                                 director.get("id"),
                                 c_name=None,
                                 photo=(director or {}).get("photo"),
                                 photo_source=(director or {}).get("photo_source"),
+                                douban_url=director_douban_url,
                             )
 
                             director_id = notion_helper.get_relation_id(
@@ -1738,6 +1797,9 @@ def get_imdb(link):
 
         # HTML结构化兜底（参考 notion_sync_data 的详情页解析方式）
         detail = parse_douban_detail_html(link, html_text=response.text, soup=soup)
+        # Cache celebrity URLs for later use by insert_movie
+        if link and detail.get("celebrity_urls"):
+            _celebrity_urls_cache[link] = detail["celebrity_urls"]
         if detail.get("imdb"):
             return detail.get("imdb")
 
@@ -1748,6 +1810,11 @@ def get_imdb(link):
     except Exception as e:
         print(f"  从豆瓣获取IMDB编号失败: {str(e)[:50]}")
     return None
+
+
+def get_cached_celebrity_urls(douban_url):
+    """获取缓存的演员/导演豆瓣主页URL"""
+    return _celebrity_urls_cache.get(douban_url)
 
 
 def _douban_info_strings(soup):
@@ -1830,6 +1897,7 @@ def parse_douban_detail_html(link, html_text=None, soup=None):
             "year": None,
             "rating": None,
             "cover": None,
+            "celebrity_urls": {"directors": [], "actors": []},
         }
 
         if infos:
@@ -1840,6 +1908,10 @@ def parse_douban_detail_html(link, html_text=None, soup=None):
             result["actors"] = _douban_get_multiple_infos_list(infos, "主演", 2)
             result["countries"] = _douban_get_single_info_list(infos, "制片国家/地区:")
             result["languages"] = _douban_get_single_info_list(infos, "语言:")
+
+        # 提取演员/导演的豆瓣主页URL
+        if html_text:
+            result["celebrity_urls"] = _extract_celebrity_urls_from_html(html_text)
 
         if not result["imdb"] and html_text:
             result["imdb"] = _extract_imdb_id_from_html(html_text)
@@ -1917,6 +1989,109 @@ def parse_douban_detail_html(link, html_text=None, soup=None):
             "rating": None,
             "cover": None,
         }
+
+
+def _extract_celebrity_urls_from_html(html_text: str) -> dict:
+    """从豆瓣电影页面HTML提取演员/导演的豆瓣主页URL
+
+    Returns:
+        {"directors": [{"name": str, "url": str}], "actors": [{"name": str, "url": str}]}
+    """
+    result = {"directors": [], "actors": []}
+    if not html_text:
+        return result
+
+    try:
+        soup = _create_soup(html_text)
+
+        # 查找导演 section
+        for h4 in soup.find_all('h4'):
+            h4_text = h4.get_text(strip=True).lower()
+            if '导演' in h4_text or 'director' in h4_text:
+                # 查找紧随其后的 span 链接
+                for span in h4.find_all_next('span', class_='attrs'):
+                    for link in span.find_all('a', href=True):
+                        href = link.get('href', '')
+                        if '/celebrity/' in href:
+                            name = link.get_text(strip=True)
+                            if name and len(result['directors']) < 2:
+                                result['directors'].append({
+                                    'name': name,
+                                    'url': href if href.startswith('http') else f"https://movie.douban.com{href}"
+                                })
+
+        # 查找主演 section
+        for h4 in soup.find_all('h4'):
+            h4_text = h4.get_text(strip=True).lower()
+            if '主演' in h4_text or 'cast' in h4_text:
+                for span in h4.find_all_next('span', class_='attrs'):
+                    for link in span.find_all('a', href=True):
+                        href = link.get('href', '')
+                        if '/celebrity/' in href:
+                            name = link.get_text(strip=True)
+                            if name and len(result['actors']) < 5:
+                                result['actors'].append({
+                                    'name': name,
+                                    'url': href if href.startswith('http') else f"https://movie.douban.com{href}"
+                                })
+    except Exception:
+        pass
+
+    return result
+
+
+def _scrape_douban_celebrity_photo(celebrity_url: str) -> Optional[str]:
+    """从豆瓣人物主页抓取头像URL"""
+    if not celebrity_url:
+        return None
+
+    cache_key = f"celebrity_photo:{celebrity_url}"
+    cached = cache_manager.get("douban_celebrity_photo", cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        }
+        response = requests.get(celebrity_url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            cache_manager.set("douban_celebrity_photo", cache_key, None)
+            return None
+
+        soup = _create_soup(response.content)
+
+        # 查找头像图片
+        img_tag = soup.select_one('#headline .pic img')
+        if img_tag and img_tag.get('src'):
+            photo_url = img_tag['src']
+            if photo_url and 'doubanio.com' in photo_url:
+                cache_manager.set("douban_celebrity_photo", cache_key, photo_url)
+                return photo_url
+
+        # 备用：查找 og:image
+        og_image = soup.select_one("meta[property='og:image']")
+        if og_image and og_image.get('content'):
+            photo_url = og_image['content']
+            if photo_url and 'doubanio.com' in photo_url:
+                cache_manager.set("douban_celebrity_photo", cache_key, photo_url)
+                return photo_url
+
+    except Exception:
+        pass
+
+    cache_manager.set("douban_celebrity_photo", cache_key, None)
+    return None
+
+
+def _find_celebrity_url(celebrity_urls, name):
+    """从缓存的演员/导演URL列表中查找匹配的豆瓣主页URL"""
+    if not celebrity_urls or not name:
+        return None
+    for person in celebrity_urls:
+        if person.get("name") == name:
+            return person.get("url")
+    return None
 
 def _strip_season(title):
     """去掉标题中的季数后缀，如'黑镜 第三季'/'Succession Season 3'"""
@@ -2595,7 +2770,7 @@ def _is_foreign_style_name(name, movie_name=None):
     return False
 
 
-def _build_person_info_payload(person_id=None, c_name=None, photo=None, photo_source=None):
+def _build_person_info_payload(person_id=None, c_name=None, photo=None, photo_source=None, douban_url=None):
     """Build person payload even when IMDb detail is partially unavailable."""
     person_info_data = get_imdb_person_info(person_id) or {} if person_id else {}
     nation = get_person_nation_from_birthplace(person_info_data.get("birthplace")) if person_info_data else None
@@ -2608,6 +2783,12 @@ def _build_person_info_payload(person_id=None, c_name=None, photo=None, photo_so
         if tmdb_photo:
             resolved_photo = tmdb_photo
             resolved_source = "TMDB"
+    # 如果还没有照片，尝试从豆瓣人物主页获取
+    if not resolved_photo and douban_url:
+        douban_photo = _scrape_douban_celebrity_photo(douban_url)
+        if douban_photo:
+            resolved_photo = douban_photo
+            resolved_source = "Douban"
     if not person_id and not resolved_photo:
         return None
     return {
@@ -2618,6 +2799,7 @@ def _build_person_info_payload(person_id=None, c_name=None, photo=None, photo_so
         "canonical_name": person_info_data.get("name"),
         "bio": person_info_data.get("bio"),
         "c_name": c_name,
+        "douban_url": douban_url,
     }
 
 

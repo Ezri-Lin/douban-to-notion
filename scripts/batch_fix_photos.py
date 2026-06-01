@@ -36,6 +36,7 @@ from douban2notion.cover_validator import (
     get_cover_url,
     get_rich_text_value,
 )
+from douban2notion.douban import _scrape_douban_celebrity_photo
 
 load_dotenv()
 
@@ -131,11 +132,28 @@ def _try_find_photo(page: Dict, db_type: str) -> Tuple[Optional[str], Optional[s
         if imdb_prop.get("type") == "rich_text":
             imdb_id = get_property_value(imdb_prop)
 
+    # 获取 DB_Url (Douban celebrity page URL)
+    db_url = None
+    db_url_prop = props.get("DB_Url") or {}
+    if db_url_prop.get("type") == "url":
+        db_url = db_url_prop.get("url")
+
     search_names = [n for n in [name, alt_name] if n]
     if alt_name:
         print(f"    Alt-Name={alt_name}", flush=True)
+    if db_url:
+        print(f"    DB_Url={db_url}", flush=True)
 
-    # 1. 尝试 IMDB（仅 Director/Actor，最可靠）
+    # 1. 尝试豆瓣人物主页（最优先，数据最准确）
+    if db_url:
+        try:
+            photo = _scrape_douban_celebrity_photo(db_url)
+            if photo and is_valid_image_url(photo):
+                return photo, "Douban"
+        except Exception as e:
+            print(f"    Douban 查询异常: {e}", flush=True)
+
+    # 2. 尝试 IMDB（仅 Director/Actor，可靠）
     if imdb_id and db_type in ("director", "actor"):
         try:
             person = get_imdb_person_info(imdb_id)
@@ -145,7 +163,7 @@ def _try_find_photo(page: Dict, db_type: str) -> Tuple[Optional[str], Optional[s
         except Exception as e:
             print(f"    IMDB 查询异常: {e}", flush=True)
 
-    # 2. 尝试 TMDB（通过 IMDB ID，可靠）
+    # 3. 尝试 TMDB（通过 IMDB ID，可靠）
     if imdb_id and db_type in ("director", "actor"):
         try:
             photo = get_tmdb_person_photo_by_imdb_id(imdb_id)
@@ -154,7 +172,7 @@ def _try_find_photo(page: Dict, db_type: str) -> Tuple[Optional[str], Optional[s
         except Exception as e:
             print(f"    TMDB (IMDB) 查询异常: {e}", flush=True)
 
-    # 3. 尝试 TMDB（通过姓名，可靠）
+    # 4. 尝试 TMDB（通过姓名，可靠）
     for search_name in search_names:
         try:
             photo = get_tmdb_person_photo_by_name(search_name)
@@ -163,7 +181,7 @@ def _try_find_photo(page: Dict, db_type: str) -> Tuple[Optional[str], Optional[s
         except Exception as e:
             print(f"    TMDB (姓名) 查询异常: {e}", flush=True)
 
-    # 4. 尝试 OpenLibrary（主名+别名）
+    # 5. 尝试 OpenLibrary（主名+别名）
     for search_name in search_names:
         try:
             photo = get_openlibrary_author_photo(search_name)
@@ -172,7 +190,7 @@ def _try_find_photo(page: Dict, db_type: str) -> Tuple[Optional[str], Optional[s
         except Exception as e:
             print(f"    OpenLibrary 查询异常: {e}", flush=True)
 
-    # 5. 尝试 Wikidata（通用）
+    # 6. 尝试 Wikidata（通用）
     for search_name in search_names:
         try:
             photo = get_wikidata_person_photo(search_name)

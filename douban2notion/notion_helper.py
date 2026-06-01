@@ -291,6 +291,9 @@ class NotionHelper:
                     properties["IMDB_Url"] = {"url": f"https://www.imdb.com/name/{person_info['imdb_id']}/"}
                 if person_info.get('bio') and "Bio" in db_properties:
                     properties["Bio"] = get_rich_text(person_info['bio'])
+                # 存储豆瓣主页URL
+                if person_info.get('douban_url') and "DB_Url" in db_properties:
+                    properties["DB_Url"] = {"url": person_info['douban_url']}
 
             page_icon = get_icon(icon) if icon else None
             page_cover = None
