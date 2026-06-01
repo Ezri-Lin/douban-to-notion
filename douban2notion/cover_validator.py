@@ -444,21 +444,25 @@ def get_openlibrary_author_photo(author_name: Optional[str]) -> Optional[str]:
 
 
 def get_author_name_by_id(notion_helper: NotionHelper, author_id: str) -> Optional[str]:
-    """获取作者名称（使用缓存管理器，兼容 Name/标题 属性）"""
+    """获取作者名称（使用缓存管理器，自动查找title类型属性）"""
     cached_name = cache_manager.get("author_name", author_id)
     if cached_name is not None:
         return cached_name
 
     try:
         page = notion_helper.client.pages.retrieve(page_id=author_id)
-        name = get_title_value(page, "Name")
-        if not name:
-            name = get_title_value(page, "标题")
+        # 遍历所有属性，找到type=="title"的那个（兼容Name/标题/其他命名）
+        for prop in (page.get("properties") or {}).values():
+            if (prop or {}).get("type") == "title":
+                name = get_property_value(prop)
+                if name:
+                    cache_manager.set("author_name", author_id, name)
+                    return name
     except Exception:
-        name = None
+        pass
 
-    cache_manager.set("author_name", author_id, name)
-    return name
+    cache_manager.set("author_name", author_id, None)
+    return None
 
 
 def _extract_douban_subject_id(url: Optional[str]) -> Optional[str]:
@@ -663,26 +667,31 @@ def _get_douban_book_cover_via_upload(nh: NotionHelper, page: Dict) -> Tuple[Opt
     props = page.get("properties") or {}
     db_url_prop = props.get("DB_Url") or props.get("Url") or {}
     db_url = get_property_value(db_url_prop)
+    title = get_title_value(page, "Name") or "book"
 
     subject_id = _extract_douban_subject_id(db_url)
     if not subject_id:
+        print(f"    📚 Douban: ✗ 无DB_Url ({db_url})")
         return None, None
 
     cover_url = _scrape_douban_book_cover_url(subject_id)
     if not cover_url:
+        print(f"    📚 Douban: ✗ subject={subject_id} 未找到封面")
         return None, None
 
     img_data = _download_image(cover_url)
     if not img_data:
+        print(f"    📚 Douban: ✗ 下载失败 {cover_url[:80]}")
         return None, None
 
-    title = get_title_value(page, "Name") or "book"
     safe_name = re.sub(r'[^\w\u4e00-\u9fff]', '_', title)[:30]
     token = nh.client.options.auth
     upload_id = _notion_upload_binary(token, img_data, f"{safe_name}.jpg")
     if not upload_id:
+        print(f"    📚 Douban: ✗ 上传失败")
         return None, None
 
+    print(f"    📚 Douban: ✓ {cover_url[:80]}")
     return upload_id, cover_url
 
 
