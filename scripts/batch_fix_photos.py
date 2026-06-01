@@ -132,6 +132,8 @@ def _try_find_photo(page: Dict, db_type: str) -> Tuple[Optional[str], Optional[s
             imdb_id = get_property_value(imdb_prop)
 
     search_names = [n for n in [name, alt_name] if n]
+    if alt_name:
+        print(f"    Alt-Name={alt_name}", flush=True)
 
     # 1. 尝试 IMDB（仅 Director/Actor，最可靠）
     if imdb_id and db_type in ("director", "actor"):
@@ -161,7 +163,16 @@ def _try_find_photo(page: Dict, db_type: str) -> Tuple[Optional[str], Optional[s
         except Exception as e:
             print(f"    TMDB (姓名) 查询异常: {e}", flush=True)
 
-    # 4. 尝试 Wikidata（通用）
+    # 4. 尝试 OpenLibrary（主名+别名）
+    for search_name in search_names:
+        try:
+            photo = get_openlibrary_author_photo(search_name)
+            if photo and is_valid_image_url(photo):
+                return photo, "OpenLibrary"
+        except Exception as e:
+            print(f"    OpenLibrary 查询异常: {e}", flush=True)
+
+    # 5. 尝试 Wikidata（通用）
     for search_name in search_names:
         try:
             photo = get_wikidata_person_photo(search_name)

@@ -11,7 +11,13 @@ import requests
 from dotenv import load_dotenv
 from tqdm import tqdm
 
-from douban2notion.douban import get_goodreads_cover, get_imdb_info, get_imdb_person_info
+from douban2notion.douban import (
+    get_goodreads_cover,
+    get_imdb_info,
+    get_imdb_person_info,
+    get_tmdb_person_photo_by_imdb_id,
+    get_tmdb_person_photo_by_name,
+)
 from douban2notion.notion_helper import NotionHelper
 from douban2notion.utils import get_icon, get_property_value
 from douban2notion.cache_manager import cache_manager
@@ -1053,6 +1059,12 @@ def _validate_single_person_photo(nh: NotionHelper, page: Dict, has_photo_proper
 
     print(f"  👤 [{name}] 照片无效，尝试查找替代照片...")
 
+    # 获取 Alt-Name 用于辅助搜索
+    alt_name = get_property_value((page.get("properties") or {}).get("Alt-Name") or {})
+    search_names = [n for n in [name, alt_name] if n]
+    if alt_name:
+        print(f"    Alt-Name={alt_name}")
+
     new_photo = None
     source = None
 
@@ -1070,25 +1082,51 @@ def _validate_single_person_photo(nh: NotionHelper, page: Dict, has_photo_proper
             else:
                 print(f"    IMDB照片: ✗ 未找到")
 
-    # 2. 尝试OpenLibrary（作者/通用）
-    if not new_photo and name:
-        photo = get_openlibrary_author_photo(name)
-        if photo and is_valid_image_url(photo):
-            new_photo = photo
-            source = "OpenLibrary"
-            print(f"    OpenLibrary照片: ✓ {photo[:80]}")
-        else:
-            print(f"    OpenLibrary照片: ✗ 未找到")
+    # 2. 尝试TMDB（通过IMDB ID）
+    if not new_photo and imdb_enabled and has_imdb_property:
+        imdb_id = get_rich_text_value(page, "IMDB")
+        if imdb_id:
+            try:
+                photo = get_tmdb_person_photo_by_imdb_id(imdb_id)
+                if photo and is_valid_image_url(photo):
+                    new_photo = photo
+                    source = "TMDB"
+                    print(f"    TMDB照片(IMDB): ✓ {photo[:80]}")
+            except Exception:
+                pass
 
-    # 3. 尝试Wikidata（兜底）
-    if not new_photo and name:
-        photo = get_wikidata_person_photo(name)
-        if photo and is_valid_image_url(photo):
-            new_photo = photo
-            source = "Wikidata"
-            print(f"    Wikidata照片: ✓ {photo[:80]}")
-        else:
-            print(f"    Wikidata照片: ✗ 未找到")
+    # 3. 尝试TMDB（通过姓名，主名+别名）
+    if not new_photo:
+        for search_name in search_names:
+            try:
+                photo = get_tmdb_person_photo_by_name(search_name)
+                if photo and is_valid_image_url(photo):
+                    new_photo = photo
+                    source = "TMDB"
+                    print(f"    TMDB照片({search_name}): ✓ {photo[:80]}")
+                    break
+            except Exception:
+                pass
+
+    # 4. 尝试OpenLibrary（主名+别名）
+    if not new_photo:
+        for search_name in search_names:
+            photo = get_openlibrary_author_photo(search_name)
+            if photo and is_valid_image_url(photo):
+                new_photo = photo
+                source = "OpenLibrary"
+                print(f"    OpenLibrary照片({search_name}): ✓ {photo[:80]}")
+                break
+
+    # 5. 尝试Wikidata（主名+别名）
+    if not new_photo:
+        for search_name in search_names:
+            photo = get_wikidata_person_photo(search_name)
+            if photo and is_valid_image_url(photo):
+                new_photo = photo
+                source = "Wikidata"
+                print(f"    Wikidata照片({search_name}): ✓ {photo[:80]}")
+                break
 
     if not new_photo or not is_valid_image_url(new_photo):
         status = "Missing" if (not prop_photo and not icon_url and not cover_url) else "Broken"
