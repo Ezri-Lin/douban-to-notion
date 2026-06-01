@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Enrich Notion databases by scraping Douban pages with Playwright.
 Covers Actor/Director photos and Book covers."""
-import json, os, sys, re, time, html as html_mod
+import json, os, sys, re, time, html as html_mod, urllib.request
 import requests, pendulum
 from playwright.sync_api import sync_playwright
 
@@ -500,7 +500,7 @@ def _fetch_douban_author_page_photo(author_id):
 
 def openlibrary_search_author(name):
     """Search Open Library for an author by name, return OL key or None."""
-    import urllib.request, urllib.parse
+    import urllib.parse
     # Strip Chinese prefixes like [美], [英], etc.
     clean = re.sub(r'^\[.*?\]\s*', '', name)
     # Strip trailing annotations like (编), (选), etc.
@@ -524,7 +524,6 @@ def openlibrary_search_author(name):
 
 def openlibrary_author_photo(ol_key):
     """Fetch author detail from Open Library, return photo URL or None."""
-    import urllib.request
     url = f'https://openlibrary.org/authors/{ol_key}.json'
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -648,7 +647,6 @@ def enrich_author_photos(dry_run=False):
 
 
 def main():
-    import urllib.request  # noqa: E402
 
     dry_run = '--dry-run' in sys.argv
     scope = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] not in ('--dry-run',) else 'all'
