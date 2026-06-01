@@ -469,6 +469,75 @@ def _extract_douban_subject_id(url: Optional[str]) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def _is_chinese_movie_by_title(title: Optional[str]) -> bool:
+    """通过标题判断是否华语影视（含中文则视为华语）"""
+    if not title:
+        return False
+    return bool(re.search(r'[\u4e00-\u9fff]', title))
+
+
+def _scrape_douban_movie_poster_url(subject_id: str) -> Optional[str]:
+    """从豆瓣电影页面爬取海报URL"""
+    cached = cache_manager.get("douban_movie_poster_url", subject_id)
+    if cached is not None:
+        return cached
+
+    url = f"https://movie.douban.com/subject/{subject_id}/"
+    try:
+        resp = requests.get(url, headers=DOUBAN_HEADERS, timeout=15, allow_redirects=True)
+        if resp.status_code != 200:
+            cache_manager.set("douban_movie_poster_url", subject_id, None)
+            return None
+        html = resp.text
+    except Exception:
+        cache_manager.set("douban_movie_poster_url", subject_id, None)
+        return None
+
+    # 模式1: id="mainpic" 的img标签
+    match = re.search(r'<img[^>]*id="mainpic"[^>]*src="([^"]+)"', html)
+    if match:
+        poster_url = match.group(1)
+        cache_manager.set("douban_movie_poster_url", subject_id, poster_url)
+        return poster_url
+
+    # 模式2: doubanio.com/view/subject 图片
+    matches = re.findall(r'src="(https://img\d+\.doubanio\.com/view/subject/[^"]*)"', html)
+    if matches:
+        cache_manager.set("douban_movie_poster_url", subject_id, matches[0])
+        return matches[0]
+
+    cache_manager.set("douban_movie_poster_url", subject_id, None)
+    return None
+
+
+def _get_douban_movie_cover_via_upload(nh: NotionHelper, page: Dict) -> Tuple[Optional[str], Optional[str]]:
+    """从豆瓣获取电影封面并上传到Notion（返回 upload_id, source_url）"""
+    props = page.get("properties") or {}
+    db_url_prop = props.get("DB_Url") or props.get("Url") or {}
+    db_url = get_property_value(db_url_prop)
+
+    subject_id = _extract_douban_subject_id(db_url)
+    if not subject_id:
+        return None, None
+
+    poster_url = _scrape_douban_movie_poster_url(subject_id)
+    if not poster_url:
+        return None, None
+
+    img_data = _download_image(poster_url)
+    if not img_data:
+        return None, None
+
+    title = get_title_value(page, "Name") or "movie"
+    safe_name = re.sub(r'[^\w\u4e00-\u9fff]', '_', title)[:30]
+    token = nh.client.options.auth
+    upload_id = _notion_upload_binary(token, img_data, f"{safe_name}.jpg")
+    if not upload_id:
+        return None, None
+
+    return upload_id, poster_url
+
+
 def _scrape_douban_book_cover_url(subject_id: str) -> Optional[str]:
     """从豆瓣书籍页面爬取封面URL（通过HTML解析，不依赖JS渲染）"""
     cached = cache_manager.get("douban_book_cover_url", subject_id)
@@ -641,31 +710,61 @@ def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bo
 
     title = get_title_value(page, "Name")
     imdb_id = get_rich_text_value(page, "IMDB")
-    print(f"  🎬 电影 [{title}] IMDB={imdb_id} 封面无效，尝试查找替代封面...")
+    is_chinese = _is_chinese_movie_by_title(title)
+    print(f"  🎬 电影 [{title}] IMDB={imdb_id} {'华语' if is_chinese else '外文'} 封面无效，尝试查找替代封面...")
 
-    if not imdb_id:
-        status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
-        print(f"  ❌ 电影 [{title}] 无IMDB ID，状态: {status}")
-        update_check_fields(
-            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status
-        )
-        return True, False
+    # 华语影视：Douban优先（下载+上传）
+    if is_chinese:
+        upload_id, douban_url = _get_douban_movie_cover_via_upload(nh, page)
+        if upload_id:
+            token = nh.client.options.auth
+            ok = _notion_set_cover_upload(
+                token, page_id, upload_id, douban_url,
+                "Cover", "CoverStatus", "CoverCheckedAt", "CoverSource",
+            )
+            if ok:
+                print(f"  ✅ 电影 [{title}] 封面已更新: Douban (uploaded) {douban_url[:80]}")
+                remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
+                return True, True
+            else:
+                print(f"  ⚠️ 电影 [{title}] 豆瓣封面上传失败，尝试IMDB...")
 
-    imdb_info = get_imdb_info(imdb_id)
-    new_cover = (imdb_info or {}).get("poster")
-    if not new_cover or not is_valid_image_url(new_cover):
-        status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
-        print(f"  ❌ 电影 [{title}] IMDB封面无效，状态: {status}")
-        update_check_fields(
-            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status
-        )
-        return True, False
+    # 外文影视或豆瓣失败：IMDB/TMDB
+    if imdb_id:
+        imdb_info = get_imdb_info(imdb_id)
+        new_cover = (imdb_info or {}).get("poster")
+        if new_cover and is_valid_image_url(new_cover):
+            try:
+                update_page_media(nh.client, page_id, "Cover", new_cover, write_property=True)
+                print(f"  ✅ 电影 [{title}] 封面已更新: IMDB {new_cover[:80]}")
+                update_check_fields(
+                    nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok", "IMDB",
+                )
+                remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
+                return True, True
+            except Exception as e:
+                print(f"  ❌ 电影 [{title}] 更新失败: {str(e)[:50]}")
 
-    try:
-        update_page_media(nh.client, page_id, "Cover", new_cover, write_property=True)
-        print(f"  ✅ 电影 [{title}] 封面已更新: IMDB {new_cover[:80]}")
-        update_check_fields(
-            nh.client,
+    # 外文影视无IMDB或IMDB失败：Douban兜底
+    if not is_chinese:
+        upload_id, douban_url = _get_douban_movie_cover_via_upload(nh, page)
+        if upload_id:
+            token = nh.client.options.auth
+            ok = _notion_set_cover_upload(
+                token, page_id, upload_id, douban_url,
+                "Cover", "CoverStatus", "CoverCheckedAt", "CoverSource",
+            )
+            if ok:
+                print(f"  ✅ 电影 [{title}] 封面已更新: Douban (uploaded) {douban_url[:80]}")
+                remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
+                return True, True
+
+    status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
+    print(f"  ❌ 电影 [{title}] 未找到可用封面，状态: {status}")
+    update_check_fields(
+        nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status
+    )
+    return True, False
             page,
             "CoverStatus",
             "CoverCheckedAt",
