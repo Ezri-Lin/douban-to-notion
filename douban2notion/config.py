@@ -64,6 +64,7 @@ actor_properties_type_dict = {
     "Bio": RICH_TEXT,  # 简介
     "IMDB": RICH_TEXT,  # IMDB编号
     "IMDB_Url": URL,
+    "DB_Url": URL,
     "DataIssue": MULTI_SELECT,
 }
 
@@ -78,6 +79,18 @@ director_properties_type_dict = {
     "Bio": RICH_TEXT,
     "IMDB": RICH_TEXT,
     "IMDB_Url": URL,
+    "DB_Url": URL,
+    "DataIssue": MULTI_SELECT,
+}
+
+author_properties_type_dict = {
+    "Name": TITLE,
+    "Alt-Name": RICH_TEXT,
+    "Photo": FILES,
+    "PhotoStatus": SELECT,
+    "PhotoCheckedAt": DATE,
+    "PhotoSource": SELECT,
+    "DB_Url": URL,
     "DataIssue": MULTI_SELECT,
 }
 
