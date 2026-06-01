@@ -3710,9 +3710,9 @@ def get_goodreads_rating(isbn):
 def _is_valid_image_url(url):
     if not url:
         return False
-    # doubanio.com 对云端IP返回418反爬，URL本身不可用
+    # doubanio.com 对云端IP返回418反爬，但URL本身有效（豆瓣API直接返回的信任URL）
     if "doubanio.com" in url:
-        return False
+        return True
     if url in COVER_URL_VALIDITY_CACHE:
         return COVER_URL_VALIDITY_CACHE[url]
     try:
@@ -4092,8 +4092,9 @@ def _get_book_cover(subject, title):
     authors = subject.get("author") or []
     author_name = authors[0] if authors else None
 
-    # 定义封面源（按优先级排序，Douban不可用已移除）
+    # 定义封面源（按优先级排序，Douban最高置信度）
     cover_sources = [
+        ("Douban", lambda: _get_douban_book_cover(subject)),
         ("Amazon", lambda: get_amazon_cover(isbn=isbn, isbn13=isbn13)),
         ("Goodreads", lambda: get_goodreads_cover(title, author=author_name, isbn=isbn)),
         ("GoogleBooks", lambda: get_google_books_cover(

@@ -1,5 +1,7 @@
 import argparse
 import os
+import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 import threading
@@ -16,6 +18,11 @@ from douban2notion.cache_manager import cache_manager
 from douban2notion.config import MAX_WORKERS, MAX_URL_WORKERS
 from douban2notion.retry_utils import retry_on_exception, safe_request
 from douban2notion.performance_monitor import timing, Timer
+
+DOUBAN_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://book.douban.com/",
+}
 
 
 load_dotenv()
@@ -49,9 +56,10 @@ def is_valid_image_url(url: Optional[str]) -> bool:
     if not url:
         return False
 
-    # doubanio.com 对云端IP返回418反爬，URL本身不可用
+    # doubanio.com 对云端IP返回418反爬，但URL本身有效（豆瓣API直接返回的信任URL）
+    # 不做HTTP验证，直接信任doubanio.com封面URL
     if "doubanio.com" in url:
-        return False
+        return True
 
     # 先检查缓存
     cached_result = cache_manager.get("data_audit_url_validation", url)
@@ -436,7 +444,7 @@ def get_openlibrary_author_photo(author_name: Optional[str]) -> Optional[str]:
 
 
 def get_author_name_by_id(notion_helper: NotionHelper, author_id: str) -> Optional[str]:
-    """获取作者名称（使用缓存管理器）"""
+    """获取作者名称（使用缓存管理器，兼容 Name/标题 属性）"""
     cached_name = cache_manager.get("author_name", author_id)
     if cached_name is not None:
         return cached_name
@@ -444,11 +452,169 @@ def get_author_name_by_id(notion_helper: NotionHelper, author_id: str) -> Option
     try:
         page = notion_helper.client.pages.retrieve(page_id=author_id)
         name = get_title_value(page, "Name")
+        if not name:
+            name = get_title_value(page, "标题")
     except Exception:
         name = None
 
     cache_manager.set("author_name", author_id, name)
     return name
+
+
+def _extract_douban_subject_id(url: Optional[str]) -> Optional[str]:
+    """从豆瓣URL中提取subject ID"""
+    if not url:
+        return None
+    match = re.search(r"/subject/(\d+)", str(url))
+    return match.group(1) if match else None
+
+
+def _scrape_douban_book_cover_url(subject_id: str) -> Optional[str]:
+    """从豆瓣书籍页面爬取封面URL（通过HTML解析，不依赖JS渲染）"""
+    cached = cache_manager.get("douban_book_cover_url", subject_id)
+    if cached is not None:
+        return cached
+
+    url = f"https://book.douban.com/subject/{subject_id}/"
+    try:
+        resp = requests.get(url, headers=DOUBAN_HEADERS, timeout=15, allow_redirects=True)
+        if resp.status_code != 200:
+            cache_manager.set("douban_book_cover_url", subject_id, None)
+            return None
+        html = resp.text
+    except Exception:
+        cache_manager.set("douban_book_cover_url", subject_id, None)
+        return None
+
+    # 尝试多种HTML模式匹配封面
+    # 模式1: id="mainpic" 的img标签
+    match = re.search(r'<img[^>]*id="mainpic"[^>]*src="([^"]+)"', html)
+    if match:
+        cover_url = match.group(1)
+        cache_manager.set("douban_book_cover_url", subject_id, cover_url)
+        return cover_url
+
+    # 模式2: doubanio.com/view/subject 图片
+    matches = re.findall(r'src="(https://img\d+\.doubanio\.com/view/subject/[^"]*)"', html)
+    if matches:
+        cache_manager.set("douban_book_cover_url", subject_id, matches[0])
+        return matches[0]
+
+    cache_manager.set("douban_book_cover_url", subject_id, None)
+    return None
+
+
+def _download_image(url: str) -> Optional[bytes]:
+    """下载图片为二进制数据"""
+    headers = DOUBAN_HEADERS if "douban" in url else {"User-Agent": "Mozilla/5.0"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        if resp.status_code == 200 and "image" in resp.headers.get("Content-Type", ""):
+            return resp.content
+    except Exception:
+        pass
+    return None
+
+
+def _notion_upload_binary(token: str, img_data: bytes, filename: str = "cover.jpg") -> Optional[str]:
+    """上传二进制图片到Notion，返回upload_id"""
+    try:
+        resp = requests.post(
+            "https://api.notion.com/v1/file_uploads",
+            json={"mode": "single_part", "filename": filename, "content_type": "image/jpeg"},
+            headers={"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28"},
+            timeout=30,
+        )
+        upload_id = resp.json().get("id")
+        if not upload_id:
+            return None
+    except Exception:
+        return None
+
+    try:
+        resp = requests.post(
+            f"https://api.notion.com/v1/file_uploads/{upload_id}/send",
+            files={"file": (filename, img_data, "image/jpeg")},
+            headers={"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28"},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            return None
+    except Exception:
+        return None
+
+    # 等待上传完成
+    for _ in range(10):
+        time.sleep(1)
+        try:
+            resp = requests.get(
+                f"https://api.notion.com/v1/file_uploads/{upload_id}",
+                headers={"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28"},
+            )
+            status = resp.json().get("status")
+            if status == "uploaded":
+                return upload_id
+            elif status == "failed":
+                return None
+        except Exception:
+            return None
+    return None
+
+
+def _notion_set_cover_upload(
+    token: str, page_id: str, upload_id: str, source_url: str,
+    cover_prop: str, status_prop: str, checked_prop: str, source_prop: str,
+):
+    """通过file_upload设置页面封面"""
+    now_str = pendulum.now("Asia/Shanghai").to_datetime_string()
+    body = {
+        "cover": {"type": "file_upload", "file_upload": {"id": upload_id}},
+        "icon": {"type": "file_upload", "file_upload": {"id": upload_id}},
+        "properties": {
+            cover_prop: {"files": [{"type": "external", "name": cover_prop, "external": {"url": source_url}}]},
+            status_prop: {"select": {"name": "Ok"}},
+            checked_prop: {"date": {"start": now_str, "time_zone": "Asia/Shanghai"}},
+            source_prop: {"select": {"name": "Douban"}},
+        },
+    }
+    try:
+        resp = requests.patch(
+            f"https://api.notion.com/v1/pages/{page_id}",
+            json=body,
+            headers={"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28"},
+            timeout=15,
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _get_douban_book_cover_via_upload(nh: NotionHelper, page: Dict) -> Tuple[Optional[str], Optional[str]]:
+    """从豆瓣获取书籍封面并上传到Notion（返回 upload_id, source_url）"""
+    props = page.get("properties") or {}
+    db_url_prop = props.get("DB_Url") or props.get("Url") or {}
+    db_url = get_property_value(db_url_prop)
+
+    subject_id = _extract_douban_subject_id(db_url)
+    if not subject_id:
+        return None, None
+
+    cover_url = _scrape_douban_book_cover_url(subject_id)
+    if not cover_url:
+        return None, None
+
+    img_data = _download_image(cover_url)
+    if not img_data:
+        return None, None
+
+    title = get_title_value(page, "Name") or "book"
+    safe_name = re.sub(r'[^\w\u4e00-\u9fff]', '_', title)[:30]
+    token = nh.client.options.auth
+    upload_id = _notion_upload_binary(token, img_data, f"{safe_name}.jpg")
+    if not upload_id:
+        return None, None
+
+    return upload_id, cover_url
 
 
 def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bool]:
@@ -597,7 +763,22 @@ def _validate_single_book_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, boo
 
     print(f"  🔍 书 [{title}] ISBN={isbn} 作者={author_name} 封面无效，尝试查找替代封面...")
 
-    # 并行尝试多个封面源
+    # 1. 优先尝试豆瓣（最高置信度，下载后上传）
+    upload_id, douban_url = _get_douban_book_cover_via_upload(nh, page)
+    if upload_id:
+        token = nh.client.options.auth
+        ok = _notion_set_cover_upload(
+            token, page_id, upload_id, douban_url,
+            "Cover", "CoverStatus", "CoverCheckedAt", "CoverSource",
+        )
+        if ok:
+            print(f"  ✅ 书 [{title}] 封面已更新: Douban (uploaded) {douban_url[:80]}")
+            remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
+            return True, True
+        else:
+            print(f"  ⚠️ 书 [{title}] 豆瓣封面上传失败，尝试其他源...")
+
+    # 2. 回退到其他源（Goodreads/OpenLibrary/GoogleBooks）
     new_cover, source = _get_book_cover_parallel(title, author_name, isbn)
 
     if not new_cover:
