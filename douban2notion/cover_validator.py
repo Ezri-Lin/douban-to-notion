@@ -137,6 +137,14 @@ def get_title_value(page, property_name: str = "Name") -> Optional[str]:
     return get_property_value(prop)
 
 
+def get_page_title(page) -> Optional[str]:
+    """遍历属性找到type=='title'的属性值（兼容Name/标题/其他命名）"""
+    for prop in (page.get("properties") or {}).values():
+        if (prop or {}).get("type") == "title":
+            return get_property_value(prop)
+    return None
+
+
 def get_rich_text_value(page, property_name: str) -> Optional[str]:
     prop = (page.get("properties") or {}).get(property_name) or {}
     return get_property_value(prop)
@@ -994,7 +1002,7 @@ def validate_book_covers(nh: NotionHelper, max_workers: int = MAX_WORKERS):
 def _validate_single_person_photo(nh: NotionHelper, page: Dict, has_photo_property: bool, has_imdb_property: bool, imdb_enabled: bool) -> Tuple[bool, bool]:
     """验证单个人物照片（用于并行处理）"""
     page_id = page.get("id")
-    name = get_title_value(page, "Name")
+    name = get_page_title(page)
 
     prop_photo = get_files_url(page, "Photo") if has_photo_property else None
     icon_url = get_icon_url(page)
