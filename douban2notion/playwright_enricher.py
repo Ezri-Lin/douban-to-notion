@@ -26,6 +26,11 @@ DB_CONFIG = {
         'cover_prop': 'Cover', 'status_prop': 'CoverStatus',
         'checked_prop': 'CoverCheckedAt', 'source_prop': 'CoverSource',
     },
+    'Author': {
+        'id': '1d8119b0-97c7-812c-a5ce-f242ddf11555', 'token': BOOK_TOKEN,
+        'person_prop': '书籍', 'cover_prop': 'Photo', 'status_prop': 'PhotoStatus',
+        'checked_prop': 'PhotoCheckedAt', 'source_prop': 'PhotoSource',
+    },
 }
 
 DOUBAN_HEADERS = {
@@ -402,6 +407,131 @@ def enrich_book_covers(dry_run=False):
     print(f'\nBook done: {enriched} enriched, {failed} failed')
 
 
+# ─── Open Library helpers ────────────────────────────────────────
+
+def openlibrary_search_author(name):
+    """Search Open Library for an author by name, return OL key or None."""
+    import urllib.request, urllib.parse
+    # Strip Chinese prefixes like [美], [英], etc.
+    clean = re.sub(r'^\[.*?\]\s*', '', name)
+    # Strip trailing annotations like (编), (选), etc.
+    clean = re.sub(r'[（(][^）)]*[）)]$', '', clean).strip()
+
+    for search_name in [clean, name]:
+        if not search_name:
+            continue
+        url = f'https://openlibrary.org/search/authors.json?q={urllib.parse.quote(search_name)}'
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read())
+            docs = data.get('docs', [])
+            if docs:
+                return docs[0].get('key')
+        except Exception:
+            time.sleep(2)
+    return None
+
+
+def openlibrary_author_photo(ol_key):
+    """Fetch author detail from Open Library, return photo URL or None."""
+    import urllib.request
+    url = f'https://openlibrary.org/authors/{ol_key}.json'
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        photos = data.get('photos', [])
+        if photos:
+            return f'https://covers.openlibrary.org/a/id/{photos[0]}-L.jpg'
+    except Exception:
+        pass
+    return None
+
+
+# ─── Enrichment logic ───────────────────────────────────────────
+
+def enrich_author_photos(dry_run=False):
+    """Enrich Author photos using Open Library API."""
+    config = DB_CONFIG['Author']
+    db_id = config['id']
+    token = config['token']
+    cover_prop = config['cover_prop']
+    status_prop = config['status_prop']
+    checked_prop = config['checked_prop']
+    source_prop = config['source_prop']
+
+    print('\n=== Enriching Author photos ===')
+    pages = notion_query(db_id, token)
+    needs_work = []
+    for p in pages:
+        name = get_name(p)
+        status = (p.get('properties') or {}).get(status_prop, {}).get('select', {})
+        if name and (p.get('cover') is None or (status and status.get('name') == 'Missing')):
+            needs_work.append({'page': p, 'name': name})
+
+    print(f'Total: {len(pages)}, Needs photo: {len(needs_work)}')
+
+    enriched = 0
+    failed = 0
+    for i, item in enumerate(needs_work):
+        name = item['name']
+        page_id = item['page']['id']
+
+        ol_key = openlibrary_search_author(name)
+        if not ol_key:
+            if dry_run:
+                print(f'  [{i+1}/{len(needs_work)}] {name}: no OL match')
+            else:
+                print(f'  [{i+1}/{len(needs_work)}] {name}: no OL match')
+            failed += 1
+            time.sleep(1)
+            continue
+
+        photo_url = openlibrary_author_photo(ol_key)
+        if dry_run:
+            status = 'found' if photo_url else 'no photo'
+            print(f'  [{i+1}/{len(needs_work)}] {name}: OL={ol_key}, {status}')
+            if photo_url:
+                enriched += 1
+            time.sleep(1)
+            continue
+
+        if not photo_url:
+            print(f'  [{i+1}/{len(needs_work)}] {name}: OL={ol_key}, no photo')
+            failed += 1
+            time.sleep(1)
+            continue
+
+        img_data = download_image(photo_url)
+        if not img_data:
+            print(f'  [{i+1}/{len(needs_work)}] {name}: download failed')
+            failed += 1
+            time.sleep(1)
+            continue
+
+        safe_name = name.replace('/', '_').replace(' ', '_')[:30]
+        upload_id = notion_upload_binary(token, img_data, f'{safe_name}.jpg')
+        if not upload_id:
+            print(f'  [{i+1}/{len(needs_work)}] {name}: upload failed')
+            failed += 1
+            time.sleep(1)
+            continue
+
+        ok = notion_set_cover(token, page_id, upload_id, photo_url,
+                              cover_prop, status_prop, checked_prop, source_prop)
+        if ok:
+            print(f'  [{i+1}/{len(needs_work)}] {name}: uploaded')
+            enriched += 1
+        else:
+            print(f'  [{i+1}/{len(needs_work)}] {name}: cover set failed')
+            failed += 1
+
+        time.sleep(1)
+
+    print(f'\nAuthor done: {enriched} enriched, {failed} failed')
+
+
 def main():
     import urllib.request  # noqa: E402
 
@@ -414,6 +544,8 @@ def main():
         enrich_person_db('Director', DB_CONFIG['Director'], dry_run)
     if scope in ('all', 'book'):
         enrich_book_covers(dry_run)
+    if scope in ('all', 'author'):
+        enrich_author_photos(dry_run)
 
 
 if __name__ == '__main__':
