@@ -223,6 +223,18 @@ def _existing_media_slots(page, property_name: Optional[str]) -> Dict[str, Optio
     }
 
 
+def _existing_media_slot_types(page, property_name: Optional[str]) -> Dict[str, Optional[str]]:
+    prop = ((page.get("properties") or {}).get(property_name) or {}) if property_name else {}
+    prop_files = prop.get("files") or []
+    icon = page.get("icon") or {}
+    cover = page.get("cover") or {}
+    return {
+        "property": (prop_files[0] or {}).get("type") if prop_files else None,
+        "icon": icon.get("type"),
+        "cover": cover.get("type"),
+    }
+
+
 def _validate_media_slots(slots: Dict[str, Optional[str]], invalid_urls=None) -> Dict[str, bool]:
     invalid_urls = set(invalid_urls or [])
     urls = [url for url in slots.values() if url]
@@ -254,6 +266,23 @@ def _media_upload_filename(page, default_name: str = "media") -> str:
     return f"{safe_name}.jpg"
 
 
+def _media_source_allows_repair(page: Dict, source_field: Optional[str]) -> bool:
+    if not source_field:
+        return False
+    source = get_property_value(((page.get("properties") or {}).get(source_field) or {}))
+    source = str(source or "").strip().lower()
+    return source in {
+        "amazon",
+        "douban",
+        "goodreads",
+        "googlebooks",
+        "imdb",
+        "openlibrary",
+        "tmdb",
+        "wikidata",
+    }
+
+
 def _copy_valid_media_to_invalid_slots(
     nh: NotionHelper,
     page: Dict,
@@ -264,14 +293,21 @@ def _copy_valid_media_to_invalid_slots(
     issue_tags,
     invalid_urls=None,
     preserve_unverified_existing: bool = False,
+    continue_on_copy_failure: bool = False,
 ) -> Optional[Tuple[bool, bool]]:
     slots = _existing_media_slots(page, property_name)
+    slot_types = _existing_media_slot_types(page, property_name)
     valid_slots = _validate_media_slots(slots, invalid_urls=invalid_urls)
     required_slots = ["icon", "cover"]
     if property_name:
         required_slots.insert(0, "property")
 
-    if all(valid_slots.get(slot, False) for slot in required_slots):
+    slot_needs_upload = {
+        slot: (not valid_slots.get(slot, False)) or slot_types.get(slot) == "external"
+        for slot in required_slots
+    }
+
+    if all(valid_slots.get(slot, False) for slot in required_slots) and not any(slot_needs_upload.values()):
         update_check_fields(nh.client, page, status_field, checked_field, source_field, "Ok")
         remove_data_issue_tags(nh.client, page, issue_tags)
         return True, False
@@ -293,6 +329,9 @@ def _copy_valid_media_to_invalid_slots(
 
     img_data = _download_image(source_url)
     if not img_data:
+        if continue_on_copy_failure and _media_source_allows_repair(page, source_field):
+            print(f"  已有自动源图片下载失败，继续查找可上传替代源: {source_slot}")
+            return None
         print(f"  已有有效图片但下载失败，跳过外部替换: {source_slot}")
         return True, False
     upload_id = _notion_upload_binary(
@@ -301,15 +340,18 @@ def _copy_valid_media_to_invalid_slots(
         _media_upload_filename(page, default_name=property_name or "media"),
     )
     if not upload_id:
+        if continue_on_copy_failure and _media_source_allows_repair(page, source_field):
+            print(f"  已有自动源图片上传失败，继续查找可上传替代源: {source_slot}")
+            return None
         print(f"  已有有效图片但上传失败，跳过外部替换: {source_slot}")
         return True, False
 
     update_payload = {"page_id": page.get("id")}
-    if not valid_slots.get("icon"):
+    if slot_needs_upload.get("icon"):
         update_payload["icon"] = _file_upload_media(upload_id)
-    if not valid_slots.get("cover"):
+    if slot_needs_upload.get("cover"):
         update_payload["cover"] = _file_upload_media(upload_id)
-    if property_name and not valid_slots.get("property"):
+    if property_name and slot_needs_upload.get("property"):
         update_payload["properties"] = {
             property_name: {"files": [_file_upload_media(upload_id, property_name)]}
         }
@@ -926,6 +968,7 @@ def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bo
         "CoverSource",
         {"BrokenCover", "MissingCover"},
         preserve_unverified_existing=True,
+        continue_on_copy_failure=True,
     )
     if existing_media_result is not None:
         return existing_media_result
@@ -1054,6 +1097,7 @@ def _validate_single_book_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, boo
         "CoverSource",
         {"BrokenCover", "MissingCover"},
         preserve_unverified_existing=True,
+        continue_on_copy_failure=True,
     )
     if existing_media_result is not None:
         return existing_media_result
@@ -1169,8 +1213,8 @@ def _get_book_cover_parallel(title: str, author_name: Optional[str], isbn: Optio
 
 @timing
 def validate_book_covers(nh: NotionHelper, max_workers: int = MAX_WORKERS):
-    """并行验证书籍封面（仅查 Missing/Broken）"""
-    pages = _query_needing_repair(nh, nh.book_database_id, "CoverStatus")
+    """并行验证书籍封面（扫全库以便把有效 external 转为 Notion 上传文件）"""
+    pages = nh.query_all(database_id=nh.book_database_id)
     fixed = 0
     checked = 0
 

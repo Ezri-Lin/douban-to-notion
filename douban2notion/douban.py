@@ -4358,6 +4358,122 @@ def _get_book_cover(subject, title):
     return None, None
 
 
+def _file_upload_media(upload_id, name=None):
+    payload = {"type": "file_upload", "file_upload": {"id": upload_id}}
+    if name:
+        payload["name"] = name
+    return payload
+
+
+def _book_cover_upload_filename(book):
+    title = (book or {}).get("Name") or "book_cover"
+    safe_name = re.sub(r"[^\w\u4e00-\u9fff]", "_", str(title))[:30] or "book_cover"
+    return f"{safe_name}.jpg"
+
+
+def _download_image_for_notion_upload(url):
+    if not url:
+        return None
+    try:
+        response = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=20,
+            allow_redirects=True,
+        )
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        if response.status_code == 200 and content_type.startswith("image/"):
+            return response.content
+    except Exception:
+        return None
+    return None
+
+
+def _notion_upload_binary(token, img_data, filename="cover.jpg"):
+    if not token or not img_data:
+        return None
+    headers = {"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28"}
+    try:
+        response = requests.post(
+            "https://api.notion.com/v1/file_uploads",
+            json={"filename": filename, "content_type": "image/jpeg"},
+            headers=headers,
+            timeout=15,
+        )
+        if response.status_code != 200:
+            return None
+        upload_id = response.json().get("id")
+        if not upload_id:
+            return None
+        send_response = requests.post(
+            f"https://api.notion.com/v1/file_uploads/{upload_id}/send",
+            files={"file": (filename, img_data, "image/jpeg")},
+            headers=headers,
+            timeout=30,
+        )
+        if send_response.status_code != 200:
+            return None
+        for _ in range(10):
+            poll_response = requests.get(
+                f"https://api.notion.com/v1/file_uploads/{upload_id}",
+                headers=headers,
+                timeout=15,
+            )
+            status = poll_response.json().get("status")
+            if status == "uploaded":
+                return upload_id
+            if status == "failed":
+                return None
+    except Exception:
+        return None
+    return None
+
+
+def _build_uploaded_book_cover_payload(notion_helper, book):
+    cover_url = (book or {}).get("Cover")
+    if not cover_url:
+        return None
+    img_data = _download_image_for_notion_upload(cover_url)
+    if not img_data:
+        return None
+    upload_id = _notion_upload_binary(
+        notion_helper.client.options.auth,
+        img_data,
+        _book_cover_upload_filename(book),
+    )
+    if not upload_id:
+        return None
+    return {
+        "property": {"files": [_file_upload_media(upload_id, "Cover")]},
+        "icon": _file_upload_media(upload_id),
+        "cover": _file_upload_media(upload_id),
+    }
+
+
+def _mark_book_cover_upload_failed(properties, book=None):
+    properties.pop("Cover", None)
+    properties["CoverStatus"] = {"select": {"name": "Broken"}}
+    properties["CoverCheckedAt"] = {
+        "date": {
+            "start": pendulum.now(utils.tz).to_datetime_string(),
+            "time_zone": "Asia/Shanghai",
+        }
+    }
+    if book is not None:
+        book.pop("Cover", None)
+        book["CoverStatus"] = "Broken"
+
+
+def _apply_uploaded_book_cover_to_properties(properties, notion_helper, book):
+    upload_payload = _build_uploaded_book_cover_payload(notion_helper, book)
+    if not upload_payload:
+        _mark_book_cover_upload_failed(properties, book)
+        print(f"  书籍封面下载/上传失败，跳过外链写入: {(book or {}).get('Name')}")
+        return None, None
+    properties["Cover"] = upload_payload["property"]
+    return upload_payload["icon"], upload_payload["cover"]
+
+
 def _extract_book_year(subject):
     for date_str in subject.get("pubdate") or []:
         year_match = re.search(r"\d{4}", date_str)
@@ -4858,8 +4974,14 @@ def insert_book(
                 changed_keys = list(changed_fields.keys())
                 print(f"更新: {book.get('Name')} [{', '.join(changed_keys)}]")
                 notion_helper.get_date_relation(properties, create_time)
-                icon = get_icon(book.get("Cover")) if changed_fields.get("Cover") and book.get("Cover") else None
-                cover_payload = get_icon(book.get("Cover")) if changed_fields.get("Cover") and book.get("Cover") else None
+                icon = None
+                cover_payload = None
+                if changed_fields.get("Cover") and book.get("Cover"):
+                    icon, cover_payload = _apply_uploaded_book_cover_to_properties(
+                        properties,
+                        notion_helper,
+                        book,
+                    )
                 notion_helper.update_page(
                     page_id=existing_book.get("page_id"),
                     properties=properties,
@@ -4889,12 +5011,23 @@ def insert_book(
             print(f"插入{book.get('Name')}")
             properties = utils.get_properties(book, book_properties_type_dict)
             notion_helper.get_date_relation(properties, create_time)
+            cover_icon = None
+            cover_payload = None
+            if book.get("Cover"):
+                cover_icon, cover_payload = _apply_uploaded_book_cover_to_properties(
+                    properties,
+                    notion_helper,
+                    book,
+                )
             parent = {
                 "database_id": notion_helper.book_database_id,
                 "type": "database_id",
             }
             created_page = notion_helper.create_page(
-                parent=parent, properties=properties, icon=get_icon(book.get("Cover")), cover=get_icon(book.get("Cover"))
+                parent=parent,
+                properties=properties,
+                icon=cover_icon,
+                cover=cover_payload,
             )
             created_book = {
                 "Name": book.get("Name"),

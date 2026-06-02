@@ -24,6 +24,17 @@ class FakeNotionHelper:
         self.client = FakeClient()
 
 
+class FakeBookQueryHelper(FakeNotionHelper):
+    def __init__(self, pages):
+        super().__init__()
+        self.book_database_id = "book-db"
+        self.pages = pages
+
+    def query_all(self, database_id):
+        assert database_id == self.book_database_id
+        return self.pages
+
+
 class FlakyPages(FakePages):
     def __init__(self, failures_before_success):
         super().__init__()
@@ -64,6 +75,22 @@ def test_file_urls_include_notion_hosted_files():
     assert cover_validator.get_cover_url(page) == "https://s3.us-west-2.amazonaws.com/notion/page-cover.jpg"
 
 
+def test_validate_book_covers_scans_all_pages_for_external_upload_conversion(monkeypatch):
+    pages = [{"id": "ok-external-page"}, {"id": "broken-page"}]
+    nh = FakeBookQueryHelper(pages)
+    seen = []
+
+    def fake_validate(notion_helper, page):
+        seen.append(page["id"])
+        return True, False
+
+    monkeypatch.setattr(cover_validator, "_validate_single_book_cover", fake_validate)
+
+    cover_validator.validate_book_covers(nh, max_workers=1)
+
+    assert sorted(seen) == ["broken-page", "ok-external-page"]
+
+
 def test_book_cover_repair_copies_single_valid_slot_to_missing_slots(monkeypatch):
     nh = FakeNotionHelper()
     valid_cover = "https://example.com/valid-cover.jpg"
@@ -96,7 +123,49 @@ def test_book_cover_repair_copies_single_valid_slot_to_missing_slots(monkeypatch
     assert media_updates
     assert media_updates[0]["icon"] == {"type": "file_upload", "file_upload": {"id": "upload-id"}}
     assert media_updates[0]["cover"] == {"type": "file_upload", "file_upload": {"id": "upload-id"}}
-    assert "properties" not in media_updates[0]
+    assert media_updates[0]["properties"]["Cover"]["files"][0] == {
+        "type": "file_upload",
+        "file_upload": {"id": "upload-id"},
+        "name": "Cover",
+    }
+
+
+def test_book_cover_repair_converts_all_valid_external_slots_to_upload(monkeypatch):
+    nh = FakeNotionHelper()
+    valid_cover = "https://example.com/valid-cover.jpg"
+    page = {
+        "id": "book-page",
+        "properties": {
+            "Name": {"type": "title", "title": [{"plain_text": "测试书"}]},
+            "Cover": {"type": "files", "files": [{"type": "external", "external": {"url": valid_cover}}]},
+            "CoverStatus": {"type": "select", "select": {"name": "Ok"}},
+            "CoverCheckedAt": {"type": "date", "date": None},
+            "CoverSource": {"type": "select", "select": {"name": "Douban"}},
+        },
+        "icon": {"type": "external", "external": {"url": valid_cover}},
+        "cover": {"type": "external", "external": {"url": valid_cover}},
+    }
+
+    monkeypatch.setattr(cover_validator, "batch_validate_urls", lambda urls, max_workers=3: {valid_cover: True})
+    monkeypatch.setattr(cover_validator, "_download_image", lambda url: b"image-bytes")
+    monkeypatch.setattr(cover_validator, "_notion_upload_binary", lambda token, img_data, filename: "upload-id")
+
+    checked, fixed = cover_validator._validate_single_book_cover(nh, page)
+
+    assert checked is True
+    assert fixed is True
+    media_updates = [
+        update for update in nh.client.pages.updates
+        if update.get("icon") or update.get("cover")
+    ]
+    assert media_updates
+    assert media_updates[0]["icon"] == {"type": "file_upload", "file_upload": {"id": "upload-id"}}
+    assert media_updates[0]["cover"] == {"type": "file_upload", "file_upload": {"id": "upload-id"}}
+    assert media_updates[0]["properties"]["Cover"]["files"][0] == {
+        "type": "file_upload",
+        "file_upload": {"id": "upload-id"},
+        "name": "Cover",
+    }
 
 
 def test_cover_repair_retries_transient_notion_update(monkeypatch):
@@ -161,6 +230,45 @@ def test_existing_valid_slot_blocks_external_replacement_when_copy_fails(monkeyp
     assert checked is True
     assert fixed is False
     assert nh.client.pages.updates == []
+
+
+def test_automated_book_cover_copy_failure_can_fallback_to_uploaded_source(monkeypatch):
+    nh = FakeNotionHelper()
+    old_cover = "https://img1.doubanio.com/view/subject/raw/public/old.jpg"
+    fallback_cover = "https://covers.openlibrary.org/b/id/1-L.jpg"
+    captured = {}
+    page = {
+        "id": "book-page",
+        "properties": {
+            "Name": {"type": "title", "title": [{"plain_text": "测试书"}]},
+            "ISBN": {"type": "rich_text", "rich_text": []},
+            "Author": {"type": "relation", "relation": []},
+            "Cover": {"type": "files", "files": [{"type": "external", "external": {"url": old_cover}}]},
+            "CoverStatus": {"type": "select", "select": {"name": "Broken"}},
+            "CoverCheckedAt": {"type": "date", "date": None},
+            "CoverSource": {"type": "select", "select": {"name": "Douban"}},
+        },
+        "icon": None,
+        "cover": None,
+    }
+
+    def fake_patch(url, json, headers, timeout):
+        captured["json"] = json
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(cover_validator, "batch_validate_urls", lambda urls, max_workers=3: {old_cover: True})
+    monkeypatch.setattr(cover_validator, "_download_image", lambda url: None if url == old_cover else b"image-bytes")
+    monkeypatch.setattr(cover_validator, "_get_douban_book_cover_via_upload", lambda nh, page: (None, None))
+    monkeypatch.setattr(cover_validator, "_get_book_cover_parallel", lambda *args: (fallback_cover, "OpenLibrary"))
+    monkeypatch.setattr(cover_validator, "_notion_upload_binary", lambda token, img_data, filename: "upload-id")
+    monkeypatch.setattr(cover_validator.requests, "patch", fake_patch)
+
+    checked, fixed = cover_validator._validate_single_book_cover(nh, page)
+
+    assert checked is True
+    assert fixed is True
+    assert captured["json"]["properties"]["Cover"]["files"][0]["type"] == "file_upload"
+    assert captured["json"]["properties"]["CoverSource"] == {"select": {"name": "OpenLibrary"}}
 
 
 def test_existing_unverified_book_cover_is_not_replaced_by_external_sources(monkeypatch):
