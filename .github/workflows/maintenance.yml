@@ -2,65 +2,36 @@ name: weekly maintenance
 
 on:
   workflow_dispatch:
+    inputs:
+      scope:
+        description: "Maintenance scope"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - movie
+          - book
+          - actor
+          - director
+          - author
+      deep_photo_repair:
+        description: "Also run Playwright and batch photo repair"
+        required: false
+        default: false
+        type: boolean
   schedule:
-    - cron: "0 2 * * 1"  # 每周一 02:00 UTC (北京时间 10:00)
+    - cron: "0 2 * * 1"  # Weekly Monday 02:00 UTC / Beijing 10:00
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  sync:
-    name: Sync Latest Data
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-      MOVIE_NOTION_TOKEN: ${{ secrets.MOVIE_NOTION_TOKEN }}
-      BOOK_NOTION_TOKEN: ${{ secrets.BOOK_NOTION_TOKEN }}
-      NOTION_MOVIE_URL: ${{ secrets.NOTION_MOVIE_URL }}
-      NOTION_BOOK_URL: ${{ secrets.NOTION_BOOK_URL }}
-      DOUBAN_NAME: ${{ secrets.DOUBAN_NAME }}
-      AUTH_TOKEN: ${{ secrets.AUTH_TOKEN }}
-      TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-      TMDB_ID_OVERRIDE_JSON: ${{ secrets.TMDB_ID_OVERRIDE_JSON }}
-      IMDB_TITLE_ALIAS_JSON: ${{ secrets.IMDB_TITLE_ALIAS_JSON }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-      - name: Restore last sync timestamp
-        uses: actions/download-artifact@v4
-        with:
-          name: sync-timestamp
-          path: .
-        continue-on-error: true
-      - name: Set sync-since
-        run: |
-          if [ -f last_success_time.txt ]; then
-            echo "SYNC_SINCE=$(cat last_success_time.txt)" >> $GITHUB_ENV
-            echo "从上次成功时间同步: $(cat last_success_time.txt)"
-          else
-            echo "SYNC_SINCE=" >> $GITHUB_ENV
-            echo "无历史时间戳，全量同步"
-          fi
-      - name: Sync book
-        run: python -m douban2notion.douban book ${SYNC_SINCE:+--since "$SYNC_SINCE"}
-      - name: Sync movie
-        run: python -m douban2notion.douban movie --dedupe-duplicates ${SYNC_SINCE:+--since "$SYNC_SINCE"}
-
   audit:
     name: Audit Data Quality
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    needs: sync
     env:
       NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
       MOVIE_NOTION_TOKEN: ${{ secrets.MOVIE_NOTION_TOKEN }}
@@ -80,9 +51,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Audit all data
-        run: python -u -m douban2notion.data_audit all --enable-person-name-mismatch
+        run: python -u -m douban2notion.data_audit ${{ inputs.scope || 'all' }} --enable-person-name-mismatch
 
-  cover_validation:
+  cover_repair:
     name: Validate & Repair Covers
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -106,4 +77,65 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Validate and repair covers
-        run: python -m douban2notion.cover_validator all
+        run: python -m douban2notion.cover_validator ${{ inputs.scope || 'all' }}
+
+  playwright_enrichment:
+    name: Playwright Enrichment
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    needs: cover_repair
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deep_photo_repair }}
+    env:
+      MOVIE_NOTION_TOKEN: ${{ secrets.MOVIE_NOTION_TOKEN }}
+      BOOK_NOTION_TOKEN: ${{ secrets.BOOK_NOTION_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Install Playwright browsers
+        run: python -m playwright install chromium
+      - name: Enrich person and book photos from Douban
+        run: python -m douban2notion.playwright_enricher ${{ inputs.scope || 'all' }}
+
+  batch_fix_photos:
+    name: Batch Fix Photos
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    needs: playwright_enrichment
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deep_photo_repair }}
+    env:
+      NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+      MOVIE_NOTION_TOKEN: ${{ secrets.MOVIE_NOTION_TOKEN }}
+      BOOK_NOTION_TOKEN: ${{ secrets.BOOK_NOTION_TOKEN }}
+      NOTION_MOVIE_URL: ${{ secrets.NOTION_MOVIE_URL }}
+      NOTION_BOOK_URL: ${{ secrets.NOTION_BOOK_URL }}
+      TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Batch fix remaining photos
+        run: |
+          SCOPE="${{ inputs.scope || 'all' }}"
+          case "$SCOPE" in
+            all|actor|director|author)
+              python scripts/batch_fix_photos.py "$SCOPE"
+              ;;
+            *)
+              echo "batch_fix_photos.py does not support scope '$SCOPE'; skipping."
+              ;;
+          esac

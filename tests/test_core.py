@@ -198,8 +198,8 @@ class TestConfigValidator:
         try:
             config = validate_config()
             assert config["DOUBAN_NAME"] == "test_user"
-            assert config["AUTH_TOKEN"] == "test_token"
             assert config["NOTION_TOKEN"] == "test_notion_token"
+            assert "AUTH_TOKEN" not in config
         finally:
             # 清理环境变量
             del os.environ["DOUBAN_NAME"]
