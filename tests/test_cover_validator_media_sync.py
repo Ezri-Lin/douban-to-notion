@@ -163,6 +163,44 @@ def test_existing_valid_slot_blocks_external_replacement_when_copy_fails(monkeyp
     assert nh.client.pages.updates == []
 
 
+def test_existing_unverified_book_cover_is_not_replaced_by_external_sources(monkeypatch):
+    nh = FakeNotionHelper()
+    existing_cover = "https://example.com/existing-cover.jpg"
+    page = {
+        "id": "book-page",
+        "properties": {
+            "Name": {"type": "title", "title": [{"plain_text": "测试书"}]},
+            "ISBN": {"type": "rich_text", "rich_text": []},
+            "Author": {"type": "relation", "relation": []},
+            "Cover": {"type": "files", "files": [{"type": "external", "external": {"url": existing_cover}}]},
+            "CoverStatus": {"type": "select", "select": {"name": "Broken"}},
+            "CoverCheckedAt": {"type": "date", "date": None},
+            "CoverSource": {"type": "select", "select": {"name": "Manual"}},
+            "DataIssue": {"type": "multi_select", "multi_select": [{"name": "BrokenCover"}]},
+        },
+        "icon": None,
+        "cover": None,
+    }
+
+    monkeypatch.setattr(cover_validator, "batch_validate_urls", lambda urls, max_workers=3: {existing_cover: False})
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("external replacement should not run when existing media cannot be verified")
+
+    monkeypatch.setattr(cover_validator, "_get_douban_book_cover_via_upload", fail_if_called)
+    monkeypatch.setattr(cover_validator, "_get_book_cover_parallel", fail_if_called)
+
+    checked, fixed = cover_validator._validate_single_book_cover(nh, page)
+
+    assert checked is True
+    assert fixed is False
+    assert all(not update.get("icon") and not update.get("cover") for update in nh.client.pages.updates)
+    assert all(
+        update.get("properties", {}).get("Cover", {}) == {}
+        for update in nh.client.pages.updates
+    )
+
+
 def test_book_cover_repair_marks_missing_when_no_existing_or_external_cover(monkeypatch):
     nh = FakeNotionHelper()
     page = {
@@ -193,6 +231,49 @@ def test_book_cover_repair_marks_missing_when_no_existing_or_external_cover(monk
         if update.get("properties", {}).get("CoverStatus")
     ]
     assert status_updates[-1]["properties"]["CoverStatus"] == {"select": {"name": "Missing"}}
+
+
+def test_book_external_fallback_uploads_instead_of_writing_external_url(monkeypatch):
+    nh = FakeNotionHelper()
+    page = {
+        "id": "book-page",
+        "properties": {
+            "Name": {"type": "title", "title": [{"plain_text": "测试书"}]},
+            "ISBN": {"type": "rich_text", "rich_text": []},
+            "Author": {"type": "relation", "relation": []},
+            "Cover": {"type": "files", "files": []},
+            "CoverStatus": {"type": "select", "select": {"name": "Broken"}},
+            "CoverCheckedAt": {"type": "date", "date": None},
+            "CoverSource": {"type": "select", "select": {"name": "Manual"}},
+        },
+        "icon": None,
+        "cover": None,
+    }
+    external_cover = "https://covers.openlibrary.org/b/id/1-L.jpg"
+    captured = {}
+
+    def fake_patch(url, json, headers, timeout):
+        captured["json"] = json
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(cover_validator, "batch_validate_urls", lambda urls, max_workers=3: {})
+    monkeypatch.setattr(cover_validator, "_get_douban_book_cover_via_upload", lambda nh, page: (None, None))
+    monkeypatch.setattr(cover_validator, "_get_book_cover_parallel", lambda *args: (external_cover, "OpenLibrary"))
+    monkeypatch.setattr(cover_validator, "_download_image", lambda url: b"image-bytes")
+    monkeypatch.setattr(cover_validator, "_notion_upload_binary", lambda token, img_data, filename: "upload-id")
+    monkeypatch.setattr(cover_validator.requests, "patch", fake_patch)
+
+    checked, fixed = cover_validator._validate_single_book_cover(nh, page)
+
+    assert checked is True
+    assert fixed is True
+    assert captured["json"]["properties"]["Cover"]["files"][0] == {
+        "type": "file_upload",
+        "file_upload": {"id": "upload-id"},
+        "name": "Cover",
+    }
+    assert captured["json"]["properties"]["CoverSource"] == {"select": {"name": "OpenLibrary"}}
+    assert not nh.client.pages.updates
 
 
 def test_person_photo_repair_copies_valid_icon_to_photo_and_cover(monkeypatch):

@@ -242,6 +242,12 @@ def _media_failure_status(page: Dict, property_name: Optional[str], invalid_urls
     return "Broken" if has_any_media else "Missing"
 
 
+def _has_existing_media(page: Dict, property_name: Optional[str], invalid_urls=None) -> bool:
+    invalid_urls = set(invalid_urls or [])
+    slots = _existing_media_slots(page, property_name)
+    return any(url and url not in invalid_urls for url in slots.values())
+
+
 def _media_upload_filename(page, default_name: str = "media") -> str:
     title = get_page_title(page) or default_name
     safe_name = re.sub(r'[^\w\u4e00-\u9fff]', '_', title)[:30] or default_name
@@ -257,6 +263,7 @@ def _copy_valid_media_to_invalid_slots(
     source_field: Optional[str],
     issue_tags,
     invalid_urls=None,
+    preserve_unverified_existing: bool = False,
 ) -> Optional[Tuple[bool, bool]]:
     slots = _existing_media_slots(page, property_name)
     valid_slots = _validate_media_slots(slots, invalid_urls=invalid_urls)
@@ -277,6 +284,11 @@ def _copy_valid_media_to_invalid_slots(
             source_url = slots.get(slot)
             break
     if not source_url:
+        if preserve_unverified_existing and _has_existing_media(page, property_name, invalid_urls=invalid_urls):
+            status = _media_failure_status(page, property_name, invalid_urls=invalid_urls)
+            update_check_fields(nh.client, page, status_field, checked_field, source_field, status)
+            print(f"  已有媒体但本次未验证通过，保留不覆盖，状态: {status}")
+            return True, False
         return None
 
     img_data = _download_image(source_url)
@@ -808,6 +820,7 @@ def _notion_upload_binary(token: str, img_data: bytes, filename: str = "cover.jp
 def _notion_set_cover_upload(
     token: str, page_id: str, upload_id: str, source_url: str,
     cover_prop: str, status_prop: str, checked_prop: str, source_prop: str,
+    source_name: str = "Douban",
 ):
     """通过file_upload设置页面封面"""
     now_str = pendulum.now("Asia/Shanghai").to_datetime_string()
@@ -818,7 +831,7 @@ def _notion_set_cover_upload(
             cover_prop: {"files": [_file_upload_media(upload_id, cover_prop)]},
             status_prop: {"select": {"name": "Ok"}},
             checked_prop: {"date": {"start": now_str, "time_zone": "Asia/Shanghai"}},
-            source_prop: {"select": {"name": "Douban"}},
+            source_prop: {"select": {"name": source_name}},
         },
     }
     try:
@@ -831,6 +844,40 @@ def _notion_set_cover_upload(
         return resp.status_code == 200
     except Exception:
         return False
+
+
+def _upload_url_to_notion_cover(
+    nh: NotionHelper,
+    page: Dict,
+    page_id: str,
+    image_url: str,
+    source_name: str,
+    cover_prop: str,
+    status_prop: str,
+    checked_prop: str,
+    source_prop: str,
+) -> bool:
+    img_data = _download_image(image_url)
+    if not img_data:
+        return False
+    upload_id = _notion_upload_binary(
+        nh.client.options.auth,
+        img_data,
+        _media_upload_filename(page, default_name=cover_prop),
+    )
+    if not upload_id:
+        return False
+    return _notion_set_cover_upload(
+        nh.client.options.auth,
+        page_id,
+        upload_id,
+        image_url,
+        cover_prop,
+        status_prop,
+        checked_prop,
+        source_prop,
+        source_name=source_name,
+    )
 
 
 def _get_douban_book_cover_via_upload(nh: NotionHelper, page: Dict) -> Tuple[Optional[str], Optional[str]]:
@@ -878,6 +925,7 @@ def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bo
         "CoverCheckedAt",
         "CoverSource",
         {"BrokenCover", "MissingCover"},
+        preserve_unverified_existing=True,
     )
     if existing_media_result is not None:
         return existing_media_result
@@ -1005,6 +1053,7 @@ def _validate_single_book_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, boo
         "CoverCheckedAt",
         "CoverSource",
         {"BrokenCover", "MissingCover"},
+        preserve_unverified_existing=True,
     )
     if existing_media_result is not None:
         return existing_media_result
@@ -1048,17 +1097,20 @@ def _validate_single_book_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, boo
         return True, False
 
     try:
-        update_page_media(nh.client, page_id, "Cover", new_cover, write_property=True)
-        print(f"  ✅ 书 [{title}] 封面已更新: {source} {new_cover[:80]}")
-        update_check_fields(
-            nh.client,
+        ok = _upload_url_to_notion_cover(
+            nh,
             page,
+            page_id,
+            new_cover,
+            source,
+            "Cover",
             "CoverStatus",
             "CoverCheckedAt",
             "CoverSource",
-            "Ok",
-            source,
         )
+        if not ok:
+            raise RuntimeError("download/upload failed")
+        print(f"  ✅ 书 [{title}] 封面已更新: {source} {new_cover[:80]}")
         remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
         return True, True
     except Exception as e:
@@ -1157,6 +1209,7 @@ def _validate_single_person_photo(nh: NotionHelper, page: Dict, has_photo_proper
         "PhotoSource",
         {"BrokenPhoto", "MissingPhoto"},
         invalid_urls={DEFAULT_USER_ICON_URL},
+        preserve_unverified_existing=True,
     )
     if existing_media_result is not None:
         return existing_media_result
