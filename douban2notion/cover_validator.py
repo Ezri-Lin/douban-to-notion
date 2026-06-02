@@ -118,23 +118,29 @@ def get_files_url(page, property_name: str) -> Optional[str]:
     files = (prop.get("files") or [])
     if not files:
         return None
-    first = files[0]
-    if first.get("type") == "external":
-        return ((first.get("external") or {}).get("url"))
-    return None
+    return _file_object_url(files[0])
 
 
 def get_icon_url(page) -> Optional[str]:
     icon = page.get("icon") or {}
-    if icon.get("type") == "external":
-        return (icon.get("external") or {}).get("url")
-    return None
+    return _file_object_url(icon)
 
 
 def get_cover_url(page) -> Optional[str]:
     cover = page.get("cover") or {}
-    if cover.get("type") == "external":
-        return (cover.get("external") or {}).get("url")
+    return _file_object_url(cover)
+
+
+def _file_object_url(file_obj: Optional[Dict]) -> Optional[str]:
+    if not file_obj:
+        return None
+    file_type = file_obj.get("type")
+    if file_type == "external":
+        return (file_obj.get("external") or {}).get("url")
+    if file_type == "file":
+        return (file_obj.get("file") or {}).get("url")
+    if file_type == "file_upload":
+        return (file_obj.get("file_upload") or {}).get("url")
     return None
 
 
@@ -169,6 +175,104 @@ def update_page_media(client, page_id: str, property_name: Optional[str], image_
             }
         }
     client.pages.update(**payload)
+
+
+def _file_upload_media(upload_id: str, name: Optional[str] = None) -> Dict:
+    payload = {"type": "file_upload", "file_upload": {"id": upload_id}}
+    if name:
+        payload["name"] = name
+    return payload
+
+
+def _existing_media_slots(page, property_name: Optional[str]) -> Dict[str, Optional[str]]:
+    return {
+        "property": get_files_url(page, property_name) if property_name else None,
+        "icon": get_icon_url(page),
+        "cover": get_cover_url(page),
+    }
+
+
+def _validate_media_slots(slots: Dict[str, Optional[str]], invalid_urls=None) -> Dict[str, bool]:
+    invalid_urls = set(invalid_urls or [])
+    urls = [url for url in slots.values() if url]
+    if not urls:
+        return {slot: False for slot in slots}
+    validation_results = batch_validate_urls(urls, max_workers=3)
+    return {
+        slot: bool(url and url not in invalid_urls and validation_results.get(url, False))
+        for slot, url in slots.items()
+    }
+
+
+def _media_upload_filename(page, default_name: str = "media") -> str:
+    title = get_page_title(page) or default_name
+    safe_name = re.sub(r'[^\w\u4e00-\u9fff]', '_', title)[:30] or default_name
+    return f"{safe_name}.jpg"
+
+
+def _copy_valid_media_to_invalid_slots(
+    nh: NotionHelper,
+    page: Dict,
+    property_name: Optional[str],
+    status_field: str,
+    checked_field: Optional[str],
+    source_field: Optional[str],
+    issue_tags,
+    invalid_urls=None,
+) -> Optional[Tuple[bool, bool]]:
+    slots = _existing_media_slots(page, property_name)
+    valid_slots = _validate_media_slots(slots, invalid_urls=invalid_urls)
+    required_slots = ["icon", "cover"]
+    if property_name:
+        required_slots.insert(0, "property")
+
+    if all(valid_slots.get(slot, False) for slot in required_slots):
+        update_check_fields(nh.client, page, status_field, checked_field, source_field, "Ok")
+        remove_data_issue_tags(nh.client, page, issue_tags)
+        return True, False
+
+    source_slot = None
+    source_url = None
+    for slot in required_slots:
+        if valid_slots.get(slot) and slots.get(slot):
+            source_slot = slot
+            source_url = slots.get(slot)
+            break
+    if not source_url:
+        return None
+
+    img_data = _download_image(source_url)
+    if not img_data:
+        print(f"  已有有效图片但下载失败，跳过外部替换: {source_slot}")
+        return True, False
+    upload_id = _notion_upload_binary(
+        nh.client.options.auth,
+        img_data,
+        _media_upload_filename(page, default_name=property_name or "media"),
+    )
+    if not upload_id:
+        print(f"  已有有效图片但上传失败，跳过外部替换: {source_slot}")
+        return True, False
+
+    update_payload = {"page_id": page.get("id")}
+    if not valid_slots.get("icon"):
+        update_payload["icon"] = _file_upload_media(upload_id)
+    if not valid_slots.get("cover"):
+        update_payload["cover"] = _file_upload_media(upload_id)
+    if property_name and not valid_slots.get("property"):
+        update_payload["properties"] = {
+            property_name: {"files": [_file_upload_media(upload_id, property_name)]}
+        }
+
+    media_changed = any(key in update_payload for key in ("icon", "cover", "properties"))
+    if media_changed:
+        nh.client.pages.update(**update_payload)
+
+    source = get_property_value(((page.get("properties") or {}).get(source_field) or {})) if source_field else None
+    update_check_fields(nh.client, page, status_field, checked_field, source_field, "Ok", source)
+    remove_data_issue_tags(nh.client, page, issue_tags)
+    print(f"  复用已有有效图片: {source_slot} -> missing/broken slots")
+    return True, media_changed
 
 
 def update_check_fields(
@@ -665,7 +769,7 @@ def _notion_set_cover_upload(
         "cover": {"type": "file_upload", "file_upload": {"id": upload_id}},
         "icon": {"type": "file_upload", "file_upload": {"id": upload_id}},
         "properties": {
-            cover_prop: {"files": [{"type": "external", "name": cover_prop, "external": {"url": source_url}}]},
+            cover_prop: {"files": [_file_upload_media(upload_id, cover_prop)]},
             status_prop: {"select": {"name": "Ok"}},
             checked_prop: {"date": {"start": now_str, "time_zone": "Asia/Shanghai"}},
             source_prop: {"select": {"name": "Douban"}},
@@ -719,24 +823,18 @@ def _get_douban_book_cover_via_upload(nh: NotionHelper, page: Dict) -> Tuple[Opt
 def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bool]:
     """验证单个电影封面（用于并行处理）"""
     page_id = page.get("id")
-    prop_cover = get_files_url(page, "Cover")
-    icon_url = get_icon_url(page)
-    cover_url = get_cover_url(page)
 
-    # 批量验证3个URL
-    urls_to_validate = [url for url in [prop_cover, icon_url, cover_url] if url]
-    if urls_to_validate:
-        validation_results = batch_validate_urls(urls_to_validate, max_workers=3)
-        valid = all(validation_results.get(url, False) for url in urls_to_validate)
-    else:
-        valid = False
-
-    if valid:
-        update_check_fields(
-            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok"
-        )
-        remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
-        return True, False  # checked, fixed
+    existing_media_result = _copy_valid_media_to_invalid_slots(
+        nh,
+        page,
+        "Cover",
+        "CoverStatus",
+        "CoverCheckedAt",
+        "CoverSource",
+        {"BrokenCover", "MissingCover"},
+    )
+    if existing_media_result is not None:
+        return existing_media_result
 
     title = get_title_value(page, "Name")
     imdb_id = get_rich_text_value(page, "IMDB")
@@ -852,24 +950,18 @@ def validate_movie_covers(nh: NotionHelper, max_workers: int = MAX_WORKERS):
 def _validate_single_book_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bool]:
     """验证单个书籍封面（用于并行处理）"""
     page_id = page.get("id")
-    prop_cover = get_files_url(page, "Cover")
-    icon_url = get_icon_url(page)
-    cover_url = get_cover_url(page)
 
-    # 批量验证3个URL
-    urls_to_validate = [url for url in [prop_cover, icon_url, cover_url] if url]
-    if urls_to_validate:
-        validation_results = batch_validate_urls(urls_to_validate, max_workers=3)
-        valid = all(validation_results.get(url, False) for url in urls_to_validate)
-    else:
-        valid = False
-
-    if valid:
-        update_check_fields(
-            nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", "Ok"
-        )
-        remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
-        return True, False
+    existing_media_result = _copy_valid_media_to_invalid_slots(
+        nh,
+        page,
+        "Cover",
+        "CoverStatus",
+        "CoverCheckedAt",
+        "CoverSource",
+        {"BrokenCover", "MissingCover"},
+    )
+    if existing_media_result is not None:
+        return existing_media_result
 
     title = get_title_value(page, "Name")
     isbn = get_rich_text_value(page, "ISBN")
@@ -1010,52 +1102,18 @@ def _validate_single_person_photo(nh: NotionHelper, page: Dict, has_photo_proper
     page_id = page.get("id")
     name = get_page_title(page)
 
-    prop_photo = get_files_url(page, "Photo") if has_photo_property else None
-    icon_url = get_icon_url(page)
-    cover_url = get_cover_url(page)
-
-    # 批量验证URL
-    urls_to_validate = []
-    if has_photo_property and prop_photo:
-        urls_to_validate.append(prop_photo)
-    if icon_url:
-        urls_to_validate.append(icon_url)
-    if cover_url:
-        urls_to_validate.append(cover_url)
-
-    if urls_to_validate:
-        validation_results = batch_validate_urls(urls_to_validate, max_workers=3)
-        valid_photo = validation_results.get(prop_photo, False) if has_photo_property and prop_photo else False
-        valid_icon = validation_results.get(icon_url, False) if icon_url else False
-        valid_cover = validation_results.get(cover_url, False) if cover_url else False
-    else:
-        valid_photo = True if has_photo_property and prop_photo else False
-        valid_icon = False
-        valid_cover = False
-
-    is_default_user_icon = bool(icon_url) and icon_url == DEFAULT_USER_ICON_URL
-
-    # 如果属性图片可用，但页面icon/cover丢失，直接用已有Photo回填
-    if has_photo_property and valid_photo and (not valid_icon or not valid_cover or is_default_user_icon) and prop_photo:
-        try:
-            update_page_media(
-                nh.client,
-                page_id,
-                property_name="Photo",
-                image_url=prop_photo,
-                write_property=False,
-            )
-            source = get_property_value(((page.get("properties") or {}).get("PhotoSource") or {}))
-            update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", "Ok", source)
-            remove_data_issue_tags(nh.client, page, {"BrokenPhoto", "MissingPhoto"})
-            return True, True
-        except Exception:
-            pass
-
-    if valid_photo and valid_icon and valid_cover:
-        update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", "Ok")
-        remove_data_issue_tags(nh.client, page, {"BrokenPhoto", "MissingPhoto"})
-        return True, False
+    existing_media_result = _copy_valid_media_to_invalid_slots(
+        nh,
+        page,
+        "Photo" if has_photo_property else None,
+        "PhotoStatus",
+        "PhotoCheckedAt",
+        "PhotoSource",
+        {"BrokenPhoto", "MissingPhoto"},
+        invalid_urls={DEFAULT_USER_ICON_URL},
+    )
+    if existing_media_result is not None:
+        return existing_media_result
 
     print(f"  👤 [{name}] 照片无效，尝试查找替代照片...")
 

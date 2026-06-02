@@ -4428,6 +4428,27 @@ def _is_missing_positive_number(value):
         return False
 
 
+def _existing_book_cover_is_valid(existing_book):
+    cover = (existing_book or {}).get("Cover")
+    if not cover:
+        return False
+    if (existing_book or {}).get("CoverStatus") == "Ok":
+        return True
+    return _is_valid_image_url(cover)
+
+
+def _preserve_existing_book_cover_if_valid(book, existing_book):
+    if not _existing_book_cover_is_valid(existing_book):
+        return False
+    book["Cover"] = existing_book.get("Cover")
+    book["CoverStatus"] = existing_book.get("CoverStatus") or "Ok"
+    if existing_book.get("CoverSource"):
+        book["CoverSource"] = existing_book.get("CoverSource")
+    else:
+        book.pop("CoverSource", None)
+    return True
+
+
 def _book_record_quality(record):
     if not record:
         return -1
@@ -4775,7 +4796,9 @@ def insert_book(
         existing_book = notion_book_dict.get(book.get("DB_Url"))
         if existing_book:
             sync_stats["matched_existing"] += 1
-            if not book.get("Cover") and existing_book.get("Cover"):
+            if _preserve_existing_book_cover_if_valid(book, existing_book):
+                pass
+            elif not book.get("Cover") and existing_book.get("Cover"):
                 book["Cover"] = existing_book.get("Cover")
                 book["CoverStatus"] = existing_book.get("CoverStatus") or "Ok"
                 if existing_book.get("CoverSource"):

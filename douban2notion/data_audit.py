@@ -152,23 +152,38 @@ def _get_files_url(page: Dict, property_name: str) -> Optional[str]:
     files = prop.get("files") or []
     if not files:
         return None
-    first = files[0]
-    if first.get("type") == "external":
-        return ((first.get("external") or {}).get("url"))
-    return None
+    return _file_object_url(files[0])
 
 
 def _get_icon_url(page: Dict) -> Optional[str]:
     icon = page.get("icon") or {}
-    if icon.get("type") == "external":
-        return ((icon.get("external") or {}).get("url"))
-    return None
+    return _file_object_url(icon)
 
 
 def _get_cover_url(page: Dict) -> Optional[str]:
     cover = page.get("cover") or {}
-    if cover.get("type") == "external":
-        return ((cover.get("external") or {}).get("url"))
+    return _file_object_url(cover)
+
+
+def _file_object_url(file_obj: Optional[Dict]) -> Optional[str]:
+    if not file_obj:
+        return None
+    file_type = file_obj.get("type")
+    if file_type == "external":
+        return ((file_obj.get("external") or {}).get("url"))
+    if file_type == "file":
+        return ((file_obj.get("file") or {}).get("url"))
+    if file_type == "file_upload":
+        return ((file_obj.get("file_upload") or {}).get("url"))
+    return None
+
+
+def _media_issue_for_urls(urls, check_remote: bool, missing_issue: str, broken_issue: str) -> Optional[str]:
+    media_urls = [url for url in (urls or []) if url]
+    if not media_urls:
+        return missing_issue
+    if check_remote and not any(_is_valid_image_url(url, check_remote=True) for url in media_urls):
+        return broken_issue
     return None
 
 
@@ -492,13 +507,14 @@ def audit_movie(
         icon_url = _get_icon_url(page)
         cover_url = _get_cover_url(page)
 
-        has_any_cover = bool(prop_cover or icon_url or cover_url)
-        if not has_any_cover:
-            issues.add(ISSUE_MISSING_COVER)
-        elif check_remote:
-            urls = [x for x in [prop_cover, icon_url, cover_url] if x]
-            if not all(_is_valid_image_url(url, check_remote=True) for url in urls):
-                issues.add(ISSUE_BROKEN_COVER)
+        cover_issue = _media_issue_for_urls(
+            [prop_cover, icon_url, cover_url],
+            check_remote=check_remote,
+            missing_issue=ISSUE_MISSING_COVER,
+            broken_issue=ISSUE_BROKEN_COVER,
+        )
+        if cover_issue:
+            issues.add(cover_issue)
 
         if name and _has_latin(name) and not _has_chinese(name):
             if _relation_has_chinese(actor_ids, actor_name_map):
@@ -587,13 +603,14 @@ def _audit_people_common(
         icon_url = _get_icon_url(page)
         cover_url = _get_cover_url(page)
 
-        has_any_photo = bool(prop_photo or icon_url or cover_url)
-        if not has_any_photo:
-            issues.add(ISSUE_MISSING_PHOTO)
-        elif check_remote:
-            urls = [x for x in [prop_photo, icon_url, cover_url] if x]
-            if not all(_is_valid_image_url(url, check_remote=True) for url in urls):
-                issues.add(ISSUE_BROKEN_PHOTO)
+        photo_issue = _media_issue_for_urls(
+            [prop_photo, icon_url, cover_url],
+            check_remote=check_remote,
+            missing_issue=ISSUE_MISSING_PHOTO,
+            broken_issue=ISSUE_BROKEN_PHOTO,
+        )
+        if photo_issue:
+            issues.add(photo_issue)
 
         updates: Dict = {}
         _append_data_issue_update(page, sorted(issues), updates)
@@ -672,13 +689,14 @@ def audit_book(nh: NotionHelper, check_remote: bool, limit: int = 0) -> Tuple[in
         icon_url = _get_icon_url(page)
         cover_url = _get_cover_url(page)
 
-        has_any_cover = bool(prop_cover or icon_url or cover_url)
-        if not has_any_cover:
-            issues.add(ISSUE_MISSING_COVER)
-        elif check_remote:
-            urls = [x for x in [prop_cover, icon_url, cover_url] if x]
-            if not all(_is_valid_image_url(url, check_remote=True) for url in urls):
-                issues.add(ISSUE_BROKEN_COVER)
+        cover_issue = _media_issue_for_urls(
+            [prop_cover, icon_url, cover_url],
+            check_remote=check_remote,
+            missing_issue=ISSUE_MISSING_COVER,
+            broken_issue=ISSUE_BROKEN_COVER,
+        )
+        if cover_issue:
+            issues.add(cover_issue)
 
         if db_url and len(db_url_map.get(db_url) or []) > 1:
             issues.add(ISSUE_DUPLICATE_DB_URL)
