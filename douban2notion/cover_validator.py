@@ -6,9 +6,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 import threading
 
+import httpx
 import pendulum
 import requests
 from dotenv import load_dotenv
+from notion_client.errors import APIErrorCode, APIResponseError, RequestTimeoutError
 from tqdm import tqdm
 
 from douban2notion.douban import (
@@ -37,10 +39,39 @@ load_dotenv()
 AUTHOR_NAME_CACHE = cache_manager.get_cache("author_name")
 OPENLIB_AUTHOR_PHOTO_CACHE = cache_manager.get_cache("openlib_author_photo")
 DEFAULT_USER_ICON_URL = "https://www.notion.so/icons/user-circle-filled_gray.svg"
+NOTION_UPDATE_MAX_ATTEMPTS = 3
+NOTION_UPDATE_RETRY_SECONDS = 2
+RETRYABLE_NOTION_CODES = {
+    APIErrorCode.RateLimited,
+    APIErrorCode.InternalServerError,
+    APIErrorCode.ServiceUnavailable,
+    APIErrorCode.ConflictError,
+}
 
 
 def now_date_payload():
     return {"date": {"start": pendulum.now("Asia/Shanghai").to_datetime_string(), "time_zone": "Asia/Shanghai"}}
+
+
+def _notion_pages_update_with_retry(client, context: str, **payload) -> bool:
+    page_id = payload.get("page_id")
+    for attempt in range(1, NOTION_UPDATE_MAX_ATTEMPTS + 1):
+        try:
+            client.pages.update(**payload)
+            return True
+        except APIResponseError as exc:
+            retryable = exc.code in RETRYABLE_NOTION_CODES
+            if not retryable or attempt == NOTION_UPDATE_MAX_ATTEMPTS:
+                print(f"  Notion更新失败 {context} page={page_id} code={exc.code}: {str(exc)[:160]}")
+                return False
+            print(f"  Notion临时更新错误 {context} page={page_id} attempt={attempt}: {str(exc)[:160]}")
+        except (httpx.HTTPError, RequestTimeoutError) as exc:
+            if attempt == NOTION_UPDATE_MAX_ATTEMPTS:
+                print(f"  Notion更新失败 {context} page={page_id}: {type(exc).__name__}: {str(exc)[:160]}")
+                return False
+            print(f"  Notion临时更新错误 {context} page={page_id} attempt={attempt}: {type(exc).__name__}: {str(exc)[:160]}")
+        time.sleep(NOTION_UPDATE_RETRY_SECONDS * attempt)
+    return False
 
 
 @retry_on_exception(max_retries=2, delay=0.5, backoff=2.0)
@@ -174,7 +205,7 @@ def update_page_media(client, page_id: str, property_name: Optional[str], image_
                 "files": [{"type": "external", "name": property_name, "external": {"url": image_url}}]
             }
         }
-    client.pages.update(**payload)
+    _notion_pages_update_with_retry(client, "media", **payload)
 
 
 def _file_upload_media(upload_id: str, name: Optional[str] = None) -> Dict:
@@ -202,6 +233,13 @@ def _validate_media_slots(slots: Dict[str, Optional[str]], invalid_urls=None) ->
         slot: bool(url and url not in invalid_urls and validation_results.get(url, False))
         for slot, url in slots.items()
     }
+
+
+def _media_failure_status(page: Dict, property_name: Optional[str], invalid_urls=None) -> str:
+    invalid_urls = set(invalid_urls or [])
+    slots = _existing_media_slots(page, property_name)
+    has_any_media = any(url and url not in invalid_urls for url in slots.values())
+    return "Broken" if has_any_media else "Missing"
 
 
 def _media_upload_filename(page, default_name: str = "media") -> str:
@@ -266,7 +304,8 @@ def _copy_valid_media_to_invalid_slots(
 
     media_changed = any(key in update_payload for key in ("icon", "cover", "properties"))
     if media_changed:
-        nh.client.pages.update(**update_payload)
+        if not _notion_pages_update_with_retry(nh.client, "copy-valid-media", **update_payload):
+            return True, False
 
     source = get_property_value(((page.get("properties") or {}).get(source_field) or {})) if source_field else None
     update_check_fields(nh.client, page, status_field, checked_field, source_field, "Ok", source)
@@ -298,7 +337,12 @@ def update_check_fields(
         if current_source != source:
             update_properties[source_field] = {"select": {"name": source}}
     if update_properties:
-        client.pages.update(page_id=page.get("id"), properties=update_properties)
+        _notion_pages_update_with_retry(
+            client,
+            "check-fields",
+            page_id=page.get("id"),
+            properties=update_properties,
+        )
 
 
 def remove_data_issue_tags(client, page, tags_to_remove):
@@ -315,7 +359,9 @@ def remove_data_issue_tags(client, page, tags_to_remove):
     final = [x for x in existing if x not in remove_set]
     if final == existing:
         return
-    client.pages.update(
+    _notion_pages_update_with_retry(
+        client,
+        "data-issue",
         page_id=page.get("id"),
         properties={"DataIssue": {"multi_select": [{"name": x} for x in final]}},
     )
@@ -887,7 +933,7 @@ def _validate_single_movie_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, bo
                 remove_data_issue_tags(nh.client, page, {"BrokenCover", "MissingCover"})
                 return True, True
 
-    status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
+    status = _media_failure_status(page, "Cover")
     print(f"  ❌ 电影 [{title}] 未找到可用封面，状态: {status}")
     update_check_fields(
         nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status
@@ -994,7 +1040,7 @@ def _validate_single_book_cover(nh: NotionHelper, page: Dict) -> Tuple[bool, boo
     new_cover, source = _get_book_cover_parallel(title, author_name, isbn, author_alt_name)
 
     if not new_cover:
-        status = "Missing" if (not prop_cover and not icon_url and not cover_url) else "Broken"
+        status = _media_failure_status(page, "Cover")
         print(f"  ❌ 书 [{title}] 未找到可用封面，状态: {status}")
         update_check_fields(
             nh.client, page, "CoverStatus", "CoverCheckedAt", "CoverSource", status
@@ -1187,7 +1233,11 @@ def _validate_single_person_photo(nh: NotionHelper, page: Dict, has_photo_proper
                 break
 
     if not new_photo or not is_valid_image_url(new_photo):
-        status = "Missing" if (not prop_photo and not icon_url and not cover_url) else "Broken"
+        status = _media_failure_status(
+            page,
+            "Photo" if has_photo_property else None,
+            invalid_urls={DEFAULT_USER_ICON_URL},
+        )
         print(f"  ❌ [{name}] 未找到可用照片，状态: {status}")
         update_check_fields(nh.client, page, "PhotoStatus", "PhotoCheckedAt", "PhotoSource", status)
         return True, False

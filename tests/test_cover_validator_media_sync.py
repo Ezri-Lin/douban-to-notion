@@ -1,3 +1,4 @@
+import httpx
 from types import SimpleNamespace
 
 from douban2notion import cover_validator
@@ -21,6 +22,18 @@ class FakeClient:
 class FakeNotionHelper:
     def __init__(self):
         self.client = FakeClient()
+
+
+class FlakyPages(FakePages):
+    def __init__(self, failures_before_success):
+        super().__init__()
+        self.failures_before_success = failures_before_success
+
+    def update(self, **kwargs):
+        if len(self.updates) < self.failures_before_success:
+            self.updates.append({"failed": kwargs})
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+        return super().update(**kwargs)
 
 
 def test_file_urls_include_notion_hosted_files():
@@ -86,6 +99,36 @@ def test_book_cover_repair_copies_single_valid_slot_to_missing_slots(monkeypatch
     assert "properties" not in media_updates[0]
 
 
+def test_cover_repair_retries_transient_notion_update(monkeypatch):
+    nh = FakeNotionHelper()
+    nh.client.pages = FlakyPages(failures_before_success=1)
+    valid_cover = "https://example.com/valid-cover.jpg"
+    page = {
+        "id": "book-page",
+        "properties": {
+            "Name": {"type": "title", "title": [{"plain_text": "测试书"}]},
+            "Cover": {"type": "files", "files": [{"type": "external", "external": {"url": valid_cover}}]},
+            "CoverStatus": {"type": "select", "select": {"name": "Broken"}},
+            "CoverCheckedAt": {"type": "date", "date": None},
+            "CoverSource": {"type": "select", "select": {"name": "Manual"}},
+            "DataIssue": {"type": "multi_select", "multi_select": [{"name": "BrokenCover"}]},
+        },
+        "icon": None,
+        "cover": None,
+    }
+
+    monkeypatch.setattr(cover_validator, "batch_validate_urls", lambda urls, max_workers=3: {valid_cover: True})
+    monkeypatch.setattr(cover_validator, "_download_image", lambda url: b"image-bytes")
+    monkeypatch.setattr(cover_validator, "_notion_upload_binary", lambda token, img_data, filename: "upload-id")
+    monkeypatch.setattr(cover_validator.time, "sleep", lambda seconds: None)
+
+    checked, fixed = cover_validator._validate_single_book_cover(nh, page)
+
+    assert checked is True
+    assert fixed is True
+    assert any(update.get("icon") for update in nh.client.pages.updates)
+
+
 def test_existing_valid_slot_blocks_external_replacement_when_copy_fails(monkeypatch):
     nh = FakeNotionHelper()
     valid_cover = "https://example.com/valid-cover.jpg"
@@ -118,6 +161,38 @@ def test_existing_valid_slot_blocks_external_replacement_when_copy_fails(monkeyp
     assert checked is True
     assert fixed is False
     assert nh.client.pages.updates == []
+
+
+def test_book_cover_repair_marks_missing_when_no_existing_or_external_cover(monkeypatch):
+    nh = FakeNotionHelper()
+    page = {
+        "id": "book-page",
+        "properties": {
+            "Name": {"type": "title", "title": [{"plain_text": "测试书"}]},
+            "ISBN": {"type": "rich_text", "rich_text": []},
+            "Author": {"type": "relation", "relation": []},
+            "Cover": {"type": "files", "files": []},
+            "CoverStatus": {"type": "select", "select": {"name": "Broken"}},
+            "CoverCheckedAt": {"type": "date", "date": None},
+            "CoverSource": {"type": "select", "select": {"name": "Manual"}},
+        },
+        "icon": None,
+        "cover": None,
+    }
+
+    monkeypatch.setattr(cover_validator, "batch_validate_urls", lambda urls, max_workers=3: {})
+    monkeypatch.setattr(cover_validator, "_get_douban_book_cover_via_upload", lambda nh, page: (None, None))
+    monkeypatch.setattr(cover_validator, "_get_book_cover_parallel", lambda *args: (None, None))
+
+    checked, fixed = cover_validator._validate_single_book_cover(nh, page)
+
+    assert checked is True
+    assert fixed is False
+    status_updates = [
+        update for update in nh.client.pages.updates
+        if update.get("properties", {}).get("CoverStatus")
+    ]
+    assert status_updates[-1]["properties"]["CoverStatus"] == {"select": {"name": "Missing"}}
 
 
 def test_person_photo_repair_copies_valid_icon_to_photo_and_cover(monkeypatch):

@@ -1,12 +1,15 @@
 import argparse
 import html
 import re
+import time
 from collections import defaultdict
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
+import httpx
 import pendulum
 import requests
 from dotenv import load_dotenv
+from notion_client.errors import APIErrorCode, APIResponseError, RequestTimeoutError
 
 from douban2notion.douban import (
     get_imdb_info,
@@ -66,6 +69,15 @@ MANAGED_ISSUES = {
     ISSUE_MISSING_DOUBAN_RATING,
     ISSUE_MISSING_IMDB_RATING,
     ISSUE_PERSON_NAME_IMDB_MISMATCH,
+}
+
+NOTION_UPDATE_MAX_ATTEMPTS = 3
+NOTION_UPDATE_RETRY_SECONDS = 2
+RETRYABLE_NOTION_CODES = {
+    APIErrorCode.RateLimited,
+    APIErrorCode.InternalServerError,
+    APIErrorCode.ServiceUnavailable,
+    APIErrorCode.ConflictError,
 }
 
 
@@ -394,8 +406,24 @@ def _merge_issue_tags(existing: Sequence[str], computed: Sequence[str]) -> List[
 def _update_page_properties(client, page: Dict, updates: Dict) -> bool:
     if not updates:
         return False
-    client.pages.update(page_id=page.get("id"), properties=updates)
-    return True
+    page_id = page.get("id")
+    for attempt in range(1, NOTION_UPDATE_MAX_ATTEMPTS + 1):
+        try:
+            client.pages.update(page_id=page_id, properties=updates)
+            return True
+        except APIResponseError as exc:
+            retryable = exc.code in RETRYABLE_NOTION_CODES
+            if not retryable or attempt == NOTION_UPDATE_MAX_ATTEMPTS:
+                _log(f"[Audit] update failed page={page_id} code={exc.code}: {str(exc)[:160]}")
+                return False
+            _log(f"[Audit] transient Notion update error page={page_id} attempt={attempt}: {str(exc)[:160]}")
+        except (httpx.HTTPError, RequestTimeoutError) as exc:
+            if attempt == NOTION_UPDATE_MAX_ATTEMPTS:
+                _log(f"[Audit] update failed page={page_id}: {type(exc).__name__}: {str(exc)[:160]}")
+                return False
+            _log(f"[Audit] transient Notion update error page={page_id} attempt={attempt}: {type(exc).__name__}: {str(exc)[:160]}")
+        time.sleep(NOTION_UPDATE_RETRY_SECONDS * attempt)
+    return False
 
 
 def _append_select_update_if_changed(page: Dict, field_name: str, new_value: str, updates: Dict) -> None:
